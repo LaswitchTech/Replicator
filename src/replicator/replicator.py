@@ -235,6 +235,8 @@ class Replicator(QMainWindow):
     def init(self):
         self.setWindowTitle(getattr(self._app, "name", "Replicator"))
         self.setObjectName("Replicator")
+        # Ensure minimum window width for table visibility
+        self.setMinimumWidth(800)
 
         central = QWidget(self)
         self.setCentralWidget(central)
@@ -259,56 +261,80 @@ class Replicator(QMainWindow):
 
         root.addWidget(logo)
 
+        # --- Actions row (top, after logo) ---
+        actions_row = QHBoxLayout()
+        # No stretch at start; left-aligned by default
+        self._add_btn = Form.button(label="", icon="plus-circle", action=self._add_job)
+        self._add_btn.setToolTip("Add job")
+        self._edit_btn = Form.button(label="", icon="pencil-square", action=self._edit_job)
+        self._edit_btn.setToolTip("Edit job")
+        self._edit_btn.setVisible(False)
+        self._dup_btn = Form.button(label="", icon="files", action=self._duplicate_job)
+        self._dup_btn.setToolTip("Duplicate job")
+        self._dup_btn.setVisible(False)
+        self._del_btn = Form.button(label="", icon="trash", action=self._delete_job)
+        self._del_btn.setToolTip("Delete job")
+        self._del_btn.setVisible(False)
+        self._schedule_btn = Form.button(label="", icon="calendar-event", action=self._edit_schedule)
+        self._schedule_btn.setToolTip("Schedule")
+        self._schedule_btn.setVisible(False)
+        actions_row.addWidget(self._add_btn)
+        actions_row.addWidget(self._edit_btn)
+        actions_row.addWidget(self._dup_btn)
+        actions_row.addWidget(self._del_btn)
+        actions_row.addWidget(self._schedule_btn)
+        actions_row.addStretch(1)
+        root.addLayout(actions_row)
+
         # Table
         self._table = QTableWidget(0, 10, self)
         self._table.setHorizontalHeaderLabels([
             "Name", "Source", "Target", "Mode", "Direction", "Delete", "Metadata", "Schedule", "Last run", "Result"
         ])
-        self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        self._table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        self._table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
-        self._table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeToContents)
-        self._table.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeToContents)
-        self._table.horizontalHeader().setSectionResizeMode(8, QHeaderView.ResizeToContents)
-        self._table.horizontalHeader().setSectionResizeMode(9, QHeaderView.ResizeToContents)
         self._table.setSelectionBehavior(QTableWidget.SelectRows)
         self._table.setEditTriggers(QTableWidget.NoEditTriggers)
 
+        # Hide row numbers
+        self._table.verticalHeader().setVisible(False)
+
+        # Connect selection change to update visibility of action buttons
+        self._table.selectionModel().selectionChanged.connect(self._on_selection_changed)
+
+        # Ensure columns never shrink below their content (use scrollbar for overflow)
+        header = self._table.horizontalHeader()
+        for i in range(self._table.columnCount()):
+            header.setSectionResizeMode(i, QHeaderView.ResizeToContents)
+
+        # Keep horizontal scrollbar available for overflow
+        header.setStretchLastSection(False)
+
         root.addWidget(self._table)
 
-        # Buttons (icon only using Form.button)
-        btn_row = QHBoxLayout()
-        btn_row.addStretch(1)
-
-        add_btn = Form.button(label="", icon="plus-circle", action=self._add_job)
-        add_btn.setToolTip("Add job")
-        edit_btn = Form.button(label="", icon="pencil-square", action=self._edit_job)
-        edit_btn.setToolTip("Edit job")
-        dup_btn = Form.button(label="", icon="files", action=self._duplicate_job)
-        dup_btn.setToolTip("Duplicate job")
-        del_btn = Form.button(label="", icon="trash", action=self._delete_job)
-        del_btn.setToolTip("Delete job")
-        schedule_btn = Form.button(label="", icon="calendar-event", action=self._edit_schedule)
-        schedule_btn.setToolTip("Schedule")
+        # --- Bottom row: Configurator and Run now (right aligned) ---
+        bottom_row = QHBoxLayout()
+        bottom_row.addStretch(1)
         config_btn = Form.button(label="", icon="gear-fill", action=self._configuration.show)
         config_btn.setToolTip("Configurator")
         run_btn = Form.button(label="", icon="play-fill", action=lambda: self._run_with_ui_feedback())
         run_btn.setToolTip("Run now")
-
-        btn_row.addWidget(add_btn)
-        btn_row.addWidget(edit_btn)
-        btn_row.addWidget(dup_btn)
-        btn_row.addWidget(del_btn)
-        btn_row.addWidget(schedule_btn)
-        btn_row.addWidget(config_btn)
-        btn_row.addWidget(run_btn)
-
-        root.addLayout(btn_row)
+        bottom_row.addWidget(config_btn)
+        bottom_row.addWidget(run_btn)
+        root.addLayout(bottom_row)
 
         self._reload_jobs()
+        self._on_selection_changed()
+
+
+    def _on_selection_changed(self, *_args):
+        has = self._selected_index() >= 0
+        if hasattr(self, "_edit_btn"):
+            self._edit_btn.setVisible(has)
+        if hasattr(self, "_dup_btn"):
+            self._dup_btn.setVisible(has)
+        if hasattr(self, "_del_btn"):
+            self._del_btn.setVisible(has)
+        if hasattr(self, "_schedule_btn"):
+            self._schedule_btn.setVisible(has)
 
     def _selected_index(self) -> int:
         if not self._table:
