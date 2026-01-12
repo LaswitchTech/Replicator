@@ -37,6 +37,10 @@ def start_app():
 def start_cli():
     cli = CommandLine(name,sys.argv)
 
+    # Create main command line handler and register it with CommandLine
+    handler = Replicator()
+    handler.cli(cli)
+
     # All other code gets app via QApplication.instance()
     sys.exit(cli.exec())
 

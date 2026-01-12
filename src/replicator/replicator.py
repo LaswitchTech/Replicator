@@ -5,6 +5,11 @@ from __future__ import annotations
 
 from typing import Optional, Any, Dict, List
 
+# --- New imports for DB ---
+import os
+import sqlite3
+import json
+
 # Add datetime import for lastRun/lastResult
 from datetime import datetime, timezone
 
@@ -46,6 +51,222 @@ except ImportError:
     from log import Log
     from ui import MsgBox, Form
     from filesystem.filesystem import FileSystem
+
+
+# ------------------------------------------------------------------
+# ReplicatorDB: SQLite storage/migrations
+# ------------------------------------------------------------------
+class ReplicatorDB:
+    def __init__(self, db_path: str):
+        self._db_path = db_path
+        self._conn: Optional[sqlite3.Connection] = None
+
+    def connect(self):
+        if self._conn is not None:
+            return self._conn
+        conn = sqlite3.connect(self._db_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        self._conn = conn
+        return conn
+
+    def execute(self, sql: str, params: tuple = ()):
+        conn = self.connect()
+        cur = conn.execute(sql, params)
+        conn.commit()
+        return cur
+
+    def query_all(self, sql: str, params: tuple = ()) -> List[sqlite3.Row]:
+        conn = self.connect()
+        cur = conn.execute(sql, params)
+        return cur.fetchall()
+
+    def query_one(self, sql: str, params: tuple = ()) -> Optional[sqlite3.Row]:
+        conn = self.connect()
+        cur = conn.execute(sql, params)
+        return cur.fetchone()
+
+    def ensure_created_and_migrated(self):
+        # Ensure parent dir exists
+        db_dir = os.path.dirname(self._db_path)
+        os.makedirs(db_dir, exist_ok=True)
+        conn = self.connect()
+        # Schema migrations table
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created DATETIME DEFAULT CURRENT_TIMESTAMP,
+            modified DATETIME DEFAULT CURRENT_TIMESTAMP,
+            name TEXT NOT NULL UNIQUE
+        );
+        """)
+        # Try to create modified trigger for schema_migrations (best effort)
+        try:
+            conn.execute("""
+            CREATE TRIGGER trg_schema_migrations_modified
+            BEFORE UPDATE ON schema_migrations
+            FOR EACH ROW
+            BEGIN
+                UPDATE schema_migrations SET modified = CURRENT_TIMESTAMP WHERE id = OLD.id;
+            END;
+            """)
+        except Exception:
+            pass
+
+        # List of migrations (name, list-of-sql)
+        migrations = [
+            ("0001_init", [
+                # jobs
+                """
+                CREATE TABLE IF NOT EXISTS jobs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    modified DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    name TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    mode TEXT NOT NULL DEFAULT 'mirror',
+                    direction TEXT NOT NULL DEFAULT 'unidirectional',
+                    allowDeletion INTEGER NOT NULL DEFAULT 0,
+                    preserveMetadata INTEGER NOT NULL DEFAULT 1,
+                    pairId TEXT NULL,
+                    conflictPolicy TEXT NOT NULL DEFAULT 'newest',
+                    lastRun TEXT NULL,
+                    lastResult TEXT NULL,
+                    lastError TEXT NULL
+                );
+                """,
+                "CREATE INDEX IF NOT EXISTS idx_jobs_enabled ON jobs(enabled);",
+                # endpoints
+                """
+                CREATE TABLE IF NOT EXISTS endpoints (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    modified DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    jobId INTEGER NOT NULL,
+                    role TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    location TEXT NOT NULL,
+                    port INTEGER NULL,
+                    guest INTEGER NOT NULL DEFAULT 1,
+                    username TEXT NULL,
+                    password TEXT NULL,
+                    useKey INTEGER NOT NULL DEFAULT 0,
+                    sshKey TEXT NULL,
+                    options TEXT NULL,
+                    FOREIGN KEY(jobId) REFERENCES jobs(id) ON DELETE CASCADE
+                );
+                """,
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_endpoints_job_role ON endpoints(jobId, role);",
+                # schedule
+                """
+                CREATE TABLE IF NOT EXISTS schedule (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    modified DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    jobId INTEGER NOT NULL UNIQUE,
+                    enabled INTEGER NOT NULL DEFAULT 0,
+                    everyMinutes INTEGER NOT NULL DEFAULT 60,
+                    nextRunAt TEXT NULL,
+                    lastScheduledRunAt TEXT NULL,
+                    FOREIGN KEY(jobId) REFERENCES jobs(id) ON DELETE CASCADE
+                );
+                """,
+                # runs
+                """
+                CREATE TABLE IF NOT EXISTS runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    modified DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    jobId INTEGER NOT NULL,
+                    startedAt TEXT NOT NULL,
+                    endedAt TEXT NULL,
+                    result TEXT NOT NULL,
+                    message TEXT NULL,
+                    stats TEXT NULL,
+                    FOREIGN KEY(jobId) REFERENCES jobs(id) ON DELETE CASCADE
+                );
+                """,
+                "CREATE INDEX IF NOT EXISTS idx_runs_job_started ON runs(jobId, startedAt);",
+                # file_state
+                """
+                CREATE TABLE IF NOT EXISTS file_state (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    modified DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    jobId INTEGER NOT NULL,
+                    side TEXT NOT NULL,
+                    relPath TEXT NOT NULL,
+                    size INTEGER NOT NULL DEFAULT 0,
+                    mtime INTEGER NOT NULL DEFAULT 0,
+                    hash TEXT NULL,
+                    isDir INTEGER NOT NULL DEFAULT 0,
+                    deleted INTEGER NOT NULL DEFAULT 0,
+                    deletedAt TEXT NULL,
+                    meta TEXT NULL,
+                    FOREIGN KEY(jobId) REFERENCES jobs(id) ON DELETE CASCADE
+                );
+                """,
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_file_state ON file_state(jobId, side, relPath);",
+                # conflicts
+                """
+                CREATE TABLE IF NOT EXISTS conflicts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    modified DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    jobId INTEGER NOT NULL,
+                    runId INTEGER NULL,
+                    relPath TEXT NOT NULL,
+                    a_size INTEGER NULL,
+                    a_mtime INTEGER NULL,
+                    a_hash TEXT NULL,
+                    b_size INTEGER NULL,
+                    b_mtime INTEGER NULL,
+                    b_hash TEXT NULL,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    resolution TEXT NULL,
+                    note TEXT NULL,
+                    FOREIGN KEY(jobId) REFERENCES jobs(id) ON DELETE CASCADE,
+                    FOREIGN KEY(runId) REFERENCES runs(id) ON DELETE SET NULL
+                );
+                """,
+                "CREATE INDEX IF NOT EXISTS idx_conflicts_job_status ON conflicts(jobId, status);",
+            ]),
+        ]
+        # Apply migrations in order
+        for name, stmts in migrations:
+            row = conn.execute("SELECT 1 FROM schema_migrations WHERE name = ?", (name,)).fetchone()
+            if not row:
+                try:
+                    with conn:
+                        for stmt in stmts:
+                            conn.execute(stmt)
+                        conn.execute("INSERT INTO schema_migrations (name) VALUES (?)", (name,))
+                except Exception as e:
+                    raise RuntimeError(f"Failed to apply migration {name}: {e}")
+        # Create modified triggers for all tables (best effort)
+        for tbl in ["jobs", "endpoints", "schedule", "runs", "file_state", "conflicts"]:
+            try:
+                self._ensure_modified_trigger(tbl)
+            except Exception:
+                pass
+
+    def _ensure_modified_trigger(self, table_name: str):
+        # Try to create a BEFORE UPDATE trigger to set modified = CURRENT_TIMESTAMP
+        conn = self.connect()
+        trig_name = f"trg_{table_name}_modified"
+        # Try to drop if exists (to avoid duplicate triggers on repeated runs)
+        try:
+            conn.execute(f"DROP TRIGGER IF EXISTS {trig_name};")
+        except Exception:
+            pass
+        conn.execute(f"""
+        CREATE TRIGGER {trig_name}
+        BEFORE UPDATE ON {table_name}
+        FOR EACH ROW
+        BEGIN
+            UPDATE {table_name} SET modified = CURRENT_TIMESTAMP WHERE id = OLD.id;
+        END;
+        """)
 
 
 
@@ -750,9 +971,8 @@ class ScheduleDialog(QDialog):
 class Replicator(QMainWindow):
     """
     Replicator UI + CLI entrypoint.
-    Jobs are stored in configuration under: replicator.jobs (list of dicts).
+    Jobs are stored in SQLite database (see ReplicatorDB).
     """
-
     def __init__(
         self,
         helper: Optional[Helper] = None,
@@ -778,13 +998,28 @@ class Replicator(QMainWindow):
 
         self._fs = FileSystem(helper=self._helper, logger=self._logger)
 
-        # Ensure defaults exist
+        # Only keep configuration jobs for legacy import
         if self._configuration.get("replicator.jobs") is None:
             self._configuration.add("replicator.jobs", [], "json", label="Jobs")
             self._configuration.save()
 
+        # --- Database path setup ---
+        # Use Helper.get_cwd() if present, else os.getcwd()
+        if hasattr(self._helper, "get_cwd") and callable(getattr(self._helper, "get_cwd", None)):
+            base_dir = self._helper.get_cwd()
+        else:
+            base_dir = os.getcwd()
+        data_dir = os.path.join(base_dir, "data")
+        db_path = os.path.join(data_dir, "replicator.db")
+
+        self._db = ReplicatorDB(db_path)
+        self._db.ensure_created_and_migrated()
+        self._log(f"[Replicator] Database: {db_path}", level="debug")
+        self._log(f"[Replicator] Database migrations applied.", level="info")
+
         self._jobs: List[Dict[str, Any]] = []
         self._table: Optional[QTableWidget] = None
+        self._legacy_import_done = False
 
     # ------------------------------------------------------------------
     # CLI integration
@@ -919,12 +1154,14 @@ class Replicator(QMainWindow):
         return rows[0].row()
 
     def _reload_jobs(self):
-        self._jobs = self._configuration.get("replicator.jobs", []) or []
+        self._maybe_import_legacy_jobs()
+        self._jobs = self._db_fetch_jobs()
         self._refresh_table()
 
     def _save_jobs(self):
-        self._configuration.set("replicator.jobs", self._jobs)
-        self._configuration.save()
+        # No longer persists to config; upsert all jobs to DB (used by legacy code)
+        for job in self._jobs:
+            self._db_upsert_job(job)
 
     def _refresh_table(self):
         if not self._table:
@@ -981,9 +1218,11 @@ class Replicator(QMainWindow):
     def _add_job(self):
         dlg = JobDialog(self)
         if dlg.exec_() == QDialog.Accepted:
-            self._jobs.append(dlg.value())
-            self._save_jobs()
-            self._refresh_table()
+            new_job = dlg.value()
+            job_id = self._db_upsert_job(new_job)
+            new_job["id"] = job_id
+            self._jobs.append(new_job)
+            self._reload_jobs()
 
     def _edit_job(self):
         idx = self._selected_index()
@@ -992,9 +1231,11 @@ class Replicator(QMainWindow):
             return
         dlg = JobDialog(self, self._jobs[idx])
         if dlg.exec_() == QDialog.Accepted:
-            self._jobs[idx] = dlg.value()
-            self._save_jobs()
-            self._refresh_table()
+            updated_job = dlg.value()
+            # preserve id
+            updated_job["id"] = self._jobs[idx].get("id")
+            self._db_upsert_job(updated_job)
+            self._reload_jobs()
 
     def _duplicate_job(self):
         idx = self._selected_index()
@@ -1011,9 +1252,11 @@ class Replicator(QMainWindow):
             new_job["name"] = f"{name} (copy)"
         else:
             new_job["name"] = "Copy"
-        self._jobs.append(new_job)
-        self._save_jobs()
-        self._refresh_table()
+        if "id" in new_job:
+            del new_job["id"]
+        job_id = self._db_upsert_job(new_job)
+        new_job["id"] = job_id
+        self._reload_jobs()
         # Select the new row
         if self._table:
             new_row = self._table.rowCount() - 1
@@ -1033,9 +1276,10 @@ class Replicator(QMainWindow):
             default="Cancel",
         )
         if choice == "Delete":
-            self._jobs.pop(idx)
-            self._save_jobs()
-            self._refresh_table()
+            job_id = self._jobs[idx].get("id")
+            if job_id:
+                self._db_delete_job(job_id)
+            self._reload_jobs()
 
     def _edit_schedule(self):
         idx = self._selected_index()
@@ -1044,9 +1288,10 @@ class Replicator(QMainWindow):
             return
         dlg = ScheduleDialog(self, job=self._jobs[idx])
         if dlg.exec_() == QDialog.Accepted:
-            self._jobs[idx]["schedule"] = dlg.value()
-            self._save_jobs()
-            self._refresh_table()
+            job = self._jobs[idx]
+            job["schedule"] = dlg.value()
+            self._db_upsert_job(job)
+            self._reload_jobs()
 
     def _run_with_ui_feedback(self):
         ok = self.run()
@@ -1063,10 +1308,11 @@ class Replicator(QMainWindow):
 
     def run(self) -> bool:
         """
-        Run all configured jobs.
+        Run all configured jobs (from DB).
         Returns True if all jobs succeeded.
         """
-        jobs = self._configuration.get("replicator.jobs", []) or []
+        self._reload_jobs()
+        jobs = self._jobs
         if not jobs:
             self._log("[Replicator] No jobs configured.", level="warning")
             return False
@@ -1080,6 +1326,7 @@ class Replicator(QMainWindow):
 
     def _run_job(self, job: Dict[str, Any]) -> bool:
         name = job.get("name") or "Unnamed"
+        job_id = job.get("id")
         # Determine src/dst and types
         src_ep = job.get("sourceEndpoint")
         if isinstance(src_ep, dict):
@@ -1116,6 +1363,18 @@ class Replicator(QMainWindow):
         logline += ")"
         self._log(logline)
 
+        # Insert a run record at start
+        started_at = datetime.now(timezone.utc).isoformat()
+        run_id = None
+        try:
+            cur = self._db.execute(
+                "INSERT INTO runs (jobId, startedAt, result) VALUES (?, ?, ?)",
+                (job_id, started_at, "running"),
+            )
+            run_id = cur.lastrowid
+        except Exception as e:
+            self._log(f"[Replicator] Failed to insert run record: {e}", level="warning")
+
         ok = self._fs.copy(
             src,
             dst,
@@ -1123,12 +1382,22 @@ class Replicator(QMainWindow):
             allow_deletion=allow_deletion,
         )
 
-        # Persist lastRun and lastResult, refresh UI, save
-        job["lastRun"] = datetime.now(timezone.utc).isoformat()
+        # Persist lastRun and lastResult, refresh UI, save to DB
+        now_str = datetime.now(timezone.utc).isoformat()
+        job["lastRun"] = now_str
         job["lastResult"] = "ok" if ok else "fail"
-        self._save_jobs()
+        job["lastError"] = None if ok else "Failed"
+        self._db_upsert_job(job)
+        if run_id:
+            try:
+                self._db.execute(
+                    "UPDATE runs SET endedAt = ?, result = ?, message = ? WHERE id = ?",
+                    (now_str, "ok" if ok else "fail", None if ok else "Failed", run_id),
+                )
+            except Exception as e:
+                self._log(f"[Replicator] Failed to update run record: {e}", level="warning")
         if self._table:
-            self._refresh_table()
+            self._reload_jobs()
 
         self._log(f"[Replicator] Job '{name}' result: {'OK' if ok else 'FAIL'} (lastResult={job['lastResult']})", level="info" if ok else "warning")
         return ok
@@ -1138,3 +1407,208 @@ class Replicator(QMainWindow):
             self._logger.append(msg, level=level, channel=channel)  # type: ignore[call-arg]
         else:
             print(msg)
+
+
+# ------------------------------------------------------------------
+# DB-backed job persistence methods
+# ------------------------------------------------------------------
+    def _db_fetch_jobs(self) -> List[Dict[str, Any]]:
+        # Query jobs ordered by id
+        rows = self._db.query_all("SELECT * FROM jobs ORDER BY id ASC")
+        jobs: List[Dict[str, Any]] = []
+        for row in rows:
+            job = dict(row)
+            job["id"] = row["id"]
+            # Endpoints
+            eps = self._db.query_all("SELECT * FROM endpoints WHERE jobId = ?", (row["id"],))
+            for ep in eps:
+                ep_d = dict(ep)
+                auth = {}
+                # Compose auth dict
+                if ep_d["type"] == "local":
+                    auth = {}
+                elif ep_d["type"] in ("smb", "ftp"):
+                    auth = {
+                        "guest": bool(ep_d.get("guest", 1)),
+                        "username": ep_d.get("username") or "",
+                        "password": ep_d.get("password") or "",
+                    }
+                    if ep_d["type"] == "ftp":
+                        auth["port"] = ep_d.get("port") or 21
+                elif ep_d["type"] == "ssh":
+                    auth = {
+                        "useKey": bool(ep_d.get("useKey", 0)),
+                        "username": ep_d.get("username") or "",
+                        "password": ep_d.get("password") or "",
+                        "port": ep_d.get("port") or 22,
+                        "key": ep_d.get("sshKey") or "",
+                    }
+                # Add any JSON options
+                if ep_d.get("options"):
+                    try:
+                        auth.update(json.loads(ep_d["options"]))
+                    except Exception:
+                        pass
+                ep_obj = {
+                    "type": ep_d["type"],
+                    "location": ep_d["location"],
+                    "auth": auth,
+                }
+                if ep_d["role"] == "source":
+                    job["sourceEndpoint"] = ep_obj
+                    job["source"] = ep_d["location"]
+                elif ep_d["role"] == "target":
+                    job["targetEndpoint"] = ep_obj
+                    job["target"] = ep_d["location"]
+            # Schedule
+            sched_row = self._db.query_one("SELECT * FROM schedule WHERE jobId = ?", (row["id"],))
+            if sched_row:
+                job["schedule"] = {
+                    "enabled": bool(sched_row["enabled"]),
+                    "everyMinutes": sched_row["everyMinutes"],
+                }
+            else:
+                job["schedule"] = {"enabled": False, "everyMinutes": 60}
+            # lastRun/lastResult/lastError
+            job["lastRun"] = row["lastRun"]
+            job["lastResult"] = row["lastResult"]
+            job["lastError"] = row["lastError"]
+            jobs.append(job)
+        return jobs
+
+    def _db_upsert_job(self, job: Dict[str, Any]) -> int:
+        # Insert or update jobs row, endpoints, schedule (transaction)
+        conn = self._db.connect()
+        with conn:
+            # Upsert job
+            fields = [
+                "name", "enabled", "mode", "direction", "allowDeletion", "preserveMetadata",
+                "pairId", "conflictPolicy", "lastRun", "lastResult", "lastError"
+            ]
+            values = [
+                job.get("name"),
+                1 if job.get("enabled", True) else 0,
+                job.get("mode", "mirror"),
+                job.get("direction", "unidirectional"),
+                1 if job.get("allowDeletion", False) else 0,
+                1 if job.get("preserveMetadata", True) else 0,
+                job.get("pairId"),
+                job.get("conflictPolicy", "newest"),
+                job.get("lastRun"),
+                job.get("lastResult"),
+                job.get("lastError"),
+            ]
+            if job.get("id"):
+                # UPDATE
+                set_clause = ", ".join(f"{f}=?" for f in fields)
+                conn.execute(
+                    f"UPDATE jobs SET {set_clause} WHERE id = ?",
+                    tuple(values) + (job["id"],)
+                )
+                job_id = job["id"]
+            else:
+                # INSERT
+                placeholders = ", ".join("?" for _ in fields)
+                cur = conn.execute(
+                    f"INSERT INTO jobs ({', '.join(fields)}) VALUES ({placeholders})",
+                    tuple(values)
+                )
+                job_id = cur.lastrowid
+                job["id"] = job_id
+
+            # Endpoints (upsert by (jobId, role))
+            for role in ("source", "target"):
+                ep = job.get("sourceEndpoint") if role == "source" else job.get("targetEndpoint")
+                if not isinstance(ep, dict):
+                    continue
+                ep_type = ep.get("type", "local")
+                location = ep.get("location", "")
+                auth = ep.get("auth", {}) or {}
+                # Compose columns
+                port = None
+                guest = 1
+                username = None
+                password = None
+                useKey = 0
+                sshKey = None
+                options = {}
+                if ep_type == "local":
+                    pass
+                elif ep_type in ("smb", "ftp"):
+                    guest = 1 if auth.get("guest", True) else 0
+                    username = auth.get("username")
+                    password = auth.get("password")
+                    if ep_type == "ftp":
+                        port = int(auth.get("port", 21))
+                elif ep_type == "ssh":
+                    useKey = 1 if auth.get("useKey", False) else 0
+                    username = auth.get("username")
+                    password = auth.get("password")
+                    port = int(auth.get("port", 22))
+                    sshKey = auth.get("key")
+                # Store any extra keys in options
+                known_keys = {"guest", "username", "password", "port", "useKey", "key"}
+                for k, v in auth.items():
+                    if k not in known_keys:
+                        options[k] = v
+                # Upsert: try update first, else insert
+                ep_row = conn.execute(
+                    "SELECT id FROM endpoints WHERE jobId = ? AND role = ?",
+                    (job_id, role)
+                ).fetchone()
+                ep_fields = [
+                    "jobId", "role", "type", "location", "port", "guest", "username", "password", "useKey", "sshKey", "options"
+                ]
+                ep_values = [
+                    job_id, role, ep_type, location, port, guest, username, password, useKey, sshKey,
+                    json.dumps(options) if options else None
+                ]
+                if ep_row:
+                    set_clause = ", ".join(f"{f}=?" for f in ep_fields[2:])  # skip jobId, role
+                    conn.execute(
+                        f"UPDATE endpoints SET {set_clause} WHERE jobId=? AND role=?",
+                        tuple(ep_values[2:]) + (job_id, role)
+                    )
+                else:
+                    placeholders = ", ".join("?" for _ in ep_fields)
+                    conn.execute(
+                        f"INSERT INTO endpoints ({', '.join(ep_fields)}) VALUES ({placeholders})",
+                        tuple(ep_values)
+                    )
+            # Schedule
+            sched = job.get("schedule")
+            if sched:
+                sched_row = conn.execute(
+                    "SELECT id FROM schedule WHERE jobId = ?", (job_id,)
+                ).fetchone()
+                enabled = 1 if sched.get("enabled", False) else 0
+                every = int(sched.get("everyMinutes", 60))
+                if sched_row:
+                    conn.execute(
+                        "UPDATE schedule SET enabled=?, everyMinutes=? WHERE jobId=?",
+                        (enabled, every, job_id)
+                    )
+                else:
+                    conn.execute(
+                        "INSERT INTO schedule (jobId, enabled, everyMinutes) VALUES (?, ?, ?)",
+                        (job_id, enabled, every)
+                    )
+        return job.get("id")
+
+    def _db_delete_job(self, job_id: int) -> None:
+        self._db.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+
+    def _maybe_import_legacy_jobs(self):
+        if getattr(self, "_legacy_import_done", False):
+            return
+        self._legacy_import_done = True
+        # Only import if jobs table is empty and legacy config has jobs
+        cnt = self._db.query_one("SELECT COUNT(*) AS cnt FROM jobs")
+        if cnt and cnt["cnt"] == 0:
+            jobs = self._configuration.get("replicator.jobs", []) or []
+            if jobs:
+                imported = 0
+                for job in jobs:
+                    self._db_upsert_job(job)
+                    imported += 1
+                self._log(f"[Replicator] Imported {imported} jobs from legacy configuration.", level="info")

@@ -22,9 +22,11 @@ runtime
 # Filetypes
 *.cfg
 *.log
+*.db
 
 # Unique Directories
 /tmp/
+/data/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
