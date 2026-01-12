@@ -232,6 +232,10 @@ class ReplicatorDB:
                 """,
                 "CREATE INDEX IF NOT EXISTS idx_conflicts_job_status ON conflicts(jobId, status);",
             ]),
+            ("0002_file_state_last_seen", [
+                "ALTER TABLE file_state ADD COLUMN lastSeenAt TEXT NULL;",
+                "ALTER TABLE file_state ADD COLUMN lastSeenRunId INTEGER NULL;",
+            ]),
         ]
         # Apply migrations in order
         for name, stmts in migrations:
@@ -1031,7 +1035,7 @@ class Replicator(QMainWindow):
 
     def _load_prev_file_state(self, job_id: int, side: str) -> Dict[str, Dict[str, Any]]:
         rows = self._db.query_all(
-            "SELECT relPath, size, mtime, isDir, deleted FROM file_state WHERE jobId=? AND side=?",
+            "SELECT relPath, size, mtime, isDir, deleted, deletedAt, lastSeenAt, lastSeenRunId FROM file_state WHERE jobId=? AND side=?",
             (job_id, side),
         )
         prev: Dict[str, Dict[str, Any]] = {}
@@ -1041,38 +1045,50 @@ class Replicator(QMainWindow):
                 "mtime": int(r["mtime"] or 0),
                 "isDir": bool(r["isDir"]),
                 "deleted": bool(r["deleted"]),
+                "deletedAt": r["deletedAt"],
+                "lastSeenAt": r["lastSeenAt"],
+                "lastSeenRunId": r["lastSeenRunId"],
             }
         return prev
 
-    def _persist_file_state(self, job_id: int, side: str, cur: Dict[str, Dict[str, Any]]) -> None:
-        """Upsert current snapshot into file_state and mark missing as deleted."""
+    def _persist_file_state(self, job_id: int, side: str, cur: Dict[str, Dict[str, Any]], run_id: Optional[int]) -> None:
+        """Upsert current snapshot into file_state and mark missing as deleted, using lastSeenAt/lastSeenRunId."""
         conn = self._db.connect()
         now_iso = datetime.now(timezone.utc).isoformat()
         with conn:
-            # Mark everything as deleted first; we will clear deleted for entries that exist now.
-            conn.execute(
-                "UPDATE file_state SET deleted=1, deletedAt=? WHERE jobId=? AND side=?",
-                (now_iso, job_id, side),
-            )
+            # Upsert all current entries
             for rel, meta in cur.items():
                 is_dir = 1 if meta.get("isDir") else 0
                 size = int(meta.get("size", 0) or 0)
                 mtime = int(meta.get("mtime", 0) or 0)
-
                 row = conn.execute(
                     "SELECT id FROM file_state WHERE jobId=? AND side=? AND relPath=?",
                     (job_id, side, rel),
                 ).fetchone()
                 if row:
                     conn.execute(
-                        "UPDATE file_state SET size=?, mtime=?, isDir=?, deleted=0, deletedAt=NULL WHERE jobId=? AND side=? AND relPath=?",
-                        (size, mtime, is_dir, job_id, side, rel),
+                        "UPDATE file_state SET size=?, mtime=?, isDir=?, deleted=0, deletedAt=NULL, lastSeenAt=?, lastSeenRunId=? WHERE jobId=? AND side=? AND relPath=?",
+                        (size, mtime, is_dir, now_iso, run_id, job_id, side, rel),
                     )
                 else:
                     conn.execute(
-                        "INSERT INTO file_state (jobId, side, relPath, size, mtime, isDir, deleted) VALUES (?,?,?,?,?,?,0)",
-                        (job_id, side, rel, size, mtime, is_dir),
+                        "INSERT INTO file_state (jobId, side, relPath, size, mtime, isDir, deleted, deletedAt, lastSeenAt, lastSeenRunId) VALUES (?,?,?,?,?,?,0,NULL,?,?)",
+                        (job_id, side, rel, size, mtime, is_dir, now_iso, run_id),
                     )
+            # Mark missing as deleted (single UPDATE)
+            rels = list(cur.keys())
+            if rels:
+                placeholders = ",".join(["?"] * len(rels))
+                conn.execute(
+                    f"UPDATE file_state SET deleted=1, deletedAt=COALESCE(deletedAt, ?) WHERE jobId=? AND side=? AND deleted=0 AND relPath NOT IN ({placeholders})",
+                    (now_iso, job_id, side, *rels),
+                )
+            else:
+                # cur is empty: mark all as deleted for this job/side
+                conn.execute(
+                    "UPDATE file_state SET deleted=1, deletedAt=COALESCE(deletedAt, ?) WHERE jobId=? AND side=? AND deleted=0",
+                    (now_iso, job_id, side),
+                )
 
     def _ensure_parent_dir(self, path: str) -> None:
         parent = os.path.dirname(path)
@@ -1166,10 +1182,6 @@ class Replicator(QMainWindow):
         cur_a = self._scan_local_tree(a_root)
         cur_b = self._scan_local_tree(b_root)
 
-        # Persist current snapshot (baseline for next run)
-        self._persist_file_state(job_id, "A", cur_a)
-        self._persist_file_state(job_id, "B", cur_b)
-
         def _meta_changed(cur: Dict[str, Any], prev: Dict[str, Any]) -> bool:
             return (
                 bool(cur.get("isDir")) != bool(prev.get("isDir"))
@@ -1254,6 +1266,9 @@ class Replicator(QMainWindow):
                     else:
                         # propagate deletion (keep B deleted, delete A)
                         actions_del_a.append((rel, bool(a_cur.get("isDir"))))
+                elif b_deleted and not allow_deletion:
+                    # If B was deleted and deletions are not allowed, do NOT copy A->B (do nothing)
+                    pass
                 else:
                     # no deletion involved: treat as create on A, copy to B
                     actions_copy_a_to_b.append((rel, bool(a_cur.get("isDir"))))
@@ -1272,6 +1287,9 @@ class Replicator(QMainWindow):
                     else:
                         # propagate deletion (keep A deleted, delete B)
                         actions_del_b.append((rel, bool(b_cur.get("isDir"))))
+                elif a_deleted and not allow_deletion:
+                    # If A was deleted and deletions are not allowed, do NOT copy B->A (do nothing)
+                    pass
                 else:
                     actions_copy_b_to_a.append((rel, bool(b_cur.get("isDir"))))
                 continue
@@ -1363,6 +1381,12 @@ class Replicator(QMainWindow):
         except Exception as e:
             self._log(f"[Replicator][BiDi] Execution failed: {e}", level="error")
             return False
+
+        # After actions, scan again and persist final file state as baseline
+        final_a = self._scan_local_tree(a_root)
+        final_b = self._scan_local_tree(b_root)
+        self._persist_file_state(job_id, "A", final_a, run_id)
+        self._persist_file_state(job_id, "B", final_b, run_id)
 
         stats = {
             "copyAtoB": len(actions_copy_a_to_b),
