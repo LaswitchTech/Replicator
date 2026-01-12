@@ -5,10 +5,11 @@ from __future__ import annotations
 
 from typing import Optional, Any, Dict, List
 
-# --- New imports for DB ---
 import os
 import sqlite3
 import json
+import shutil
+import hashlib
 
 # Add datetime import for lastRun/lastResult
 from datetime import datetime, timezone
@@ -969,6 +970,423 @@ class ScheduleDialog(QDialog):
 
 
 class Replicator(QMainWindow):
+
+    # ------------------------------------------------------------------
+    # Bidirectional sync helpers (local-only for now)
+    # ------------------------------------------------------------------
+
+    def _endpoint_local_root(self, ep: Dict[str, Any]) -> str:
+        """Return the local root path for an endpoint or raise."""
+        if not isinstance(ep, dict):
+            raise ValueError("Endpoint is missing")
+        typ = (ep.get("type") or "local").lower()
+        if typ != "local":
+            raise NotImplementedError(f"Bidirectional sync is currently implemented for local endpoints only (got '{typ}').")
+        loc = (ep.get("location") or "").strip()
+        if not loc:
+            raise ValueError("Endpoint location is required")
+        return loc
+
+    def _scan_local_tree(self, root: str) -> Dict[str, Dict[str, Any]]:
+        """Return a map relPath -> {isDir,size,mtime} for a local filesystem root."""
+        root = os.path.abspath(root)
+        out: Dict[str, Dict[str, Any]] = {}
+        if not os.path.exists(root):
+            return out
+
+        # Walk directories; include dirs as entries so deletions can be propagated.
+        for dirpath, dirnames, filenames in os.walk(root):
+            # Normalize and skip hidden special entries if needed (keep simple for now)
+            rel_dir = os.path.relpath(dirpath, root)
+            if rel_dir == ".":
+                rel_dir = ""
+
+            # Record directory itself (except root)
+            if rel_dir:
+                try:
+                    st = os.stat(dirpath)
+                    out[rel_dir] = {
+                        "isDir": True,
+                        "size": 0,
+                        "mtime": int(st.st_mtime),
+                    }
+                except Exception:
+                    # If stat fails, still record directory
+                    out[rel_dir] = {"isDir": True, "size": 0, "mtime": 0}
+
+            for fn in filenames:
+                full = os.path.join(dirpath, fn)
+                rel = os.path.relpath(full, root)
+                try:
+                    st = os.stat(full)
+                    out[rel] = {
+                        "isDir": False,
+                        "size": int(st.st_size),
+                        "mtime": int(st.st_mtime),
+                    }
+                except Exception:
+                    out[rel] = {"isDir": False, "size": 0, "mtime": 0}
+
+        return out
+
+    def _load_prev_file_state(self, job_id: int, side: str) -> Dict[str, Dict[str, Any]]:
+        rows = self._db.query_all(
+            "SELECT relPath, size, mtime, isDir, deleted FROM file_state WHERE jobId=? AND side=?",
+            (job_id, side),
+        )
+        prev: Dict[str, Dict[str, Any]] = {}
+        for r in rows:
+            prev[str(r["relPath"])] = {
+                "size": int(r["size"] or 0),
+                "mtime": int(r["mtime"] or 0),
+                "isDir": bool(r["isDir"]),
+                "deleted": bool(r["deleted"]),
+            }
+        return prev
+
+    def _persist_file_state(self, job_id: int, side: str, cur: Dict[str, Dict[str, Any]]) -> None:
+        """Upsert current snapshot into file_state and mark missing as deleted."""
+        conn = self._db.connect()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with conn:
+            # Mark everything as deleted first; we will clear deleted for entries that exist now.
+            conn.execute(
+                "UPDATE file_state SET deleted=1, deletedAt=? WHERE jobId=? AND side=?",
+                (now_iso, job_id, side),
+            )
+            for rel, meta in cur.items():
+                is_dir = 1 if meta.get("isDir") else 0
+                size = int(meta.get("size", 0) or 0)
+                mtime = int(meta.get("mtime", 0) or 0)
+
+                row = conn.execute(
+                    "SELECT id FROM file_state WHERE jobId=? AND side=? AND relPath=?",
+                    (job_id, side, rel),
+                ).fetchone()
+                if row:
+                    conn.execute(
+                        "UPDATE file_state SET size=?, mtime=?, isDir=?, deleted=0, deletedAt=NULL WHERE jobId=? AND side=? AND relPath=?",
+                        (size, mtime, is_dir, job_id, side, rel),
+                    )
+                else:
+                    conn.execute(
+                        "INSERT INTO file_state (jobId, side, relPath, size, mtime, isDir, deleted) VALUES (?,?,?,?,?,?,0)",
+                        (job_id, side, rel, size, mtime, is_dir),
+                    )
+
+    def _ensure_parent_dir(self, path: str) -> None:
+        parent = os.path.dirname(path)
+        if parent and not os.path.exists(parent):
+            os.makedirs(parent, exist_ok=True)
+
+    def _copy_local_path(self, src_root: str, dst_root: str, rel: str, is_dir: bool, preserve_metadata: bool) -> None:
+        src_full = os.path.join(src_root, rel)
+        dst_full = os.path.join(dst_root, rel)
+
+        if is_dir:
+            os.makedirs(dst_full, exist_ok=True)
+            return
+
+        self._ensure_parent_dir(dst_full)
+        if preserve_metadata:
+            shutil.copy2(src_full, dst_full)
+        else:
+            shutil.copy(src_full, dst_full)
+
+    def _delete_local_path(self, root: str, rel: str, is_dir: bool) -> None:
+        full = os.path.join(root, rel)
+        if not os.path.exists(full):
+            return
+        if is_dir:
+            # Only remove if empty; never rmtree blindly in sync engine.
+            try:
+                os.rmdir(full)
+            except OSError:
+                pass
+        else:
+            try:
+                os.remove(full)
+            except Exception:
+                pass
+
+    def _record_conflict(
+        self,
+        job_id: int,
+        run_id: Optional[int],
+        rel: str,
+        a: Dict[str, Any],
+        b: Dict[str, Any],
+        note: str = "",
+    ) -> None:
+        try:
+            self._db.execute(
+                """
+                INSERT INTO conflicts (jobId, runId, relPath, a_size, a_mtime, a_hash, b_size, b_mtime, b_hash, status, note)
+                VALUES (?,?,?,?,?,?,?,?,?,'open',?)
+                """,
+                (
+                    job_id,
+                    run_id,
+                    rel,
+                    int(a.get("size", 0) or 0),
+                    int(a.get("mtime", 0) or 0),
+                    a.get("hash"),
+                    int(b.get("size", 0) or 0),
+                    int(b.get("mtime", 0) or 0),
+                    b.get("hash"),
+                    note or None,
+                ),
+            )
+        except Exception as e:
+            self._log(f"[Replicator][DB] Failed to record conflict for '{rel}': {e}", level="warning")
+
+    def _run_job_bidirectional(self, job: Dict[str, Any], run_id: Optional[int]) -> bool:
+        """Bidirectional sync using `file_state` as the persistent baseline.
+
+        Currently implemented for local<->local only.
+        """
+        job_id = int(job.get("id") or 0)
+        if job_id <= 0:
+            raise ValueError("Job must have an id to run bidirectional sync")
+
+        src_ep = job.get("sourceEndpoint")
+        dst_ep = job.get("targetEndpoint")
+        a_root = self._endpoint_local_root(src_ep)
+        b_root = self._endpoint_local_root(dst_ep)
+
+        allow_deletion = bool(job.get("allowDeletion", False))
+        preserve_metadata = bool(job.get("preserveMetadata", True))
+        conflict_policy = (job.get("conflictPolicy") or "newest").lower()
+
+        # Load previous baseline before scanning/persisting.
+        prev_a = self._load_prev_file_state(job_id, "A")
+        prev_b = self._load_prev_file_state(job_id, "B")
+
+        # Scan current trees
+        cur_a = self._scan_local_tree(a_root)
+        cur_b = self._scan_local_tree(b_root)
+
+        # Persist current snapshot (baseline for next run)
+        self._persist_file_state(job_id, "A", cur_a)
+        self._persist_file_state(job_id, "B", cur_b)
+
+        def _meta_changed(cur: Dict[str, Any], prev: Dict[str, Any]) -> bool:
+            return (
+                bool(cur.get("isDir")) != bool(prev.get("isDir"))
+                or int(cur.get("size", 0) or 0) != int(prev.get("size", 0) or 0)
+                or int(cur.get("mtime", 0) or 0) != int(prev.get("mtime", 0) or 0)
+            )
+
+        def _changed_set(cur: Dict[str, Dict[str, Any]], prev: Dict[str, Dict[str, Any]]) -> set[str]:
+            out = set()
+            for rel, meta in cur.items():
+                p = prev.get(rel)
+                if p is None or p.get("deleted", False):
+                    out.add(rel)
+                else:
+                    if _meta_changed(meta, p):
+                        out.add(rel)
+            return out
+
+        def _deleted_set(cur: Dict[str, Dict[str, Any]], prev: Dict[str, Dict[str, Any]]) -> set[str]:
+            # deleted since last baseline means it existed (not deleted) and now missing
+            out = set()
+            for rel, p in prev.items():
+                if p.get("deleted", False):
+                    continue
+                if rel not in cur:
+                    out.add(rel)
+            return out
+
+        changed_a = _changed_set(cur_a, prev_a)
+        changed_b = _changed_set(cur_b, prev_b)
+        deleted_a = _deleted_set(cur_a, prev_a)
+        deleted_b = _deleted_set(cur_b, prev_b)
+
+        self._log(
+            f"[Replicator][BiDi] Snapshot A={len(cur_a)} entries, B={len(cur_b)} entries; changedA={len(changed_a)} changedB={len(changed_b)} deletedA={len(deleted_a)} deletedB={len(deleted_b)}",
+            level="debug",
+        )
+
+        # Build unified rel set
+        all_paths = set(cur_a.keys()) | set(cur_b.keys()) | set(prev_a.keys()) | set(prev_b.keys())
+
+        actions_copy_a_to_b: list[tuple[str, bool]] = []
+        actions_copy_b_to_a: list[tuple[str, bool]] = []
+        actions_del_a: list[tuple[str, bool]] = []
+        actions_del_b: list[tuple[str, bool]] = []
+
+        # Helper for newest
+        def _winner_newest(a: Dict[str, Any], b: Dict[str, Any]) -> str:
+            am = int(a.get("mtime", 0) or 0)
+            bm = int(b.get("mtime", 0) or 0)
+            if am == bm:
+                # tie-breaker: larger size wins
+                return "A" if int(a.get("size", 0) or 0) >= int(b.get("size", 0) or 0) else "B"
+            return "A" if am > bm else "B"
+
+        for rel in sorted(all_paths):
+            a_cur = cur_a.get(rel)
+            b_cur = cur_b.get(rel)
+
+            a_exists = a_cur is not None
+            b_exists = b_cur is not None
+
+            a_changed = rel in changed_a
+            b_changed = rel in changed_b
+
+            a_deleted = rel in deleted_a
+            b_deleted = rel in deleted_b
+
+            # If exists only on one side.
+            # When deletions are enabled and the missing side deleted it since the last baseline,
+            # deletion should win unless the existing side also changed (conflict).
+            if a_exists and not b_exists:
+                if b_deleted and allow_deletion:
+                    if a_changed:
+                        # conflict: B deleted while A changed
+                        self._record_conflict(job_id, run_id, rel, a_cur, {"deleted": True}, note="B deleted, A changed")
+                        winner = "A" if conflict_policy == "newest" else "A"
+                        if winner == "A":
+                            actions_copy_a_to_b.append((rel, bool(a_cur.get("isDir"))))
+                        else:
+                            actions_del_a.append((rel, bool(a_cur.get("isDir"))))
+                    else:
+                        # propagate deletion (keep B deleted, delete A)
+                        actions_del_a.append((rel, bool(a_cur.get("isDir"))))
+                else:
+                    # no deletion involved: treat as create on A, copy to B
+                    actions_copy_a_to_b.append((rel, bool(a_cur.get("isDir"))))
+                continue
+
+            if b_exists and not a_exists:
+                if a_deleted and allow_deletion:
+                    if b_changed:
+                        # conflict: A deleted while B changed
+                        self._record_conflict(job_id, run_id, rel, {"deleted": True}, b_cur, note="A deleted, B changed")
+                        winner = "B" if conflict_policy == "newest" else "B"
+                        if winner == "B":
+                            actions_copy_b_to_a.append((rel, bool(b_cur.get("isDir"))))
+                        else:
+                            actions_del_b.append((rel, bool(b_cur.get("isDir"))))
+                    else:
+                        # propagate deletion (keep A deleted, delete B)
+                        actions_del_b.append((rel, bool(b_cur.get("isDir"))))
+                else:
+                    actions_copy_b_to_a.append((rel, bool(b_cur.get("isDir"))))
+                continue
+
+            # Missing on both sides: maybe deletion propagation; nothing to do.
+            if not a_exists and not b_exists:
+                continue
+
+            # Exists on both: check if identical
+            if a_exists and b_exists:
+                same = (
+                    bool(a_cur.get("isDir")) == bool(b_cur.get("isDir"))
+                    and int(a_cur.get("size", 0) or 0) == int(b_cur.get("size", 0) or 0)
+                    and int(a_cur.get("mtime", 0) or 0) == int(b_cur.get("mtime", 0) or 0)
+                )
+
+                if same:
+                    # Maybe propagate deletions if one side deleted previously (should not happen if same exists)
+                    continue
+
+                # Not same: detect changes since baseline
+                if a_changed and b_changed:
+                    # true conflict
+                    self._record_conflict(job_id, run_id, rel, a_cur, b_cur, note="Changed on both sides")
+                    if conflict_policy == "newest":
+                        winner = _winner_newest(a_cur, b_cur)
+                    elif conflict_policy in ("keepa", "a"):
+                        winner = "A"
+                    elif conflict_policy in ("keepb", "b"):
+                        winner = "B"
+                    else:
+                        winner = _winner_newest(a_cur, b_cur)
+
+                    if winner == "A":
+                        actions_copy_a_to_b.append((rel, bool(a_cur.get("isDir"))))
+                    else:
+                        actions_copy_b_to_a.append((rel, bool(b_cur.get("isDir"))))
+                elif a_changed and not b_changed:
+                    actions_copy_a_to_b.append((rel, bool(a_cur.get("isDir"))))
+                elif b_changed and not a_changed:
+                    actions_copy_b_to_a.append((rel, bool(b_cur.get("isDir"))))
+                else:
+                    # differs but we can't prove which changed vs baseline (e.g., first run with baseline empty)
+                    # Choose newest as default.
+                    winner = _winner_newest(a_cur, b_cur)
+                    if winner == "A":
+                        actions_copy_a_to_b.append((rel, bool(a_cur.get("isDir"))))
+                    else:
+                        actions_copy_b_to_a.append((rel, bool(b_cur.get("isDir"))))
+
+        # Deletions propagation (safe rules)
+        if allow_deletion:
+            # If A deleted and B did not change since baseline, delete on B
+            for rel in sorted(deleted_a):
+                if rel in changed_b:
+                    # conflict: deleted on A but changed on B
+                    self._record_conflict(job_id, run_id, rel, {"deleted": True}, cur_b.get(rel, {}), note="A deleted, B changed")
+                    continue
+                pb = prev_b.get(rel)
+                if pb and not pb.get("deleted", False) and rel in cur_b:
+                    actions_del_b.append((rel, bool(cur_b[rel].get("isDir"))))
+
+            # If B deleted and A did not change since baseline, delete on A
+            for rel in sorted(deleted_b):
+                if rel in changed_a:
+                    self._record_conflict(job_id, run_id, rel, cur_a.get(rel, {}), {"deleted": True}, note="B deleted, A changed")
+                    continue
+                pa = prev_a.get(rel)
+                if pa and not pa.get("deleted", False) and rel in cur_a:
+                    actions_del_a.append((rel, bool(cur_a[rel].get("isDir"))))
+
+        # Execute actions
+        try:
+            # Copy directories first to ensure parents exist
+            for rel, is_dir in actions_copy_a_to_b:
+                self._copy_local_path(a_root, b_root, rel, is_dir, preserve_metadata)
+            for rel, is_dir in actions_copy_b_to_a:
+                self._copy_local_path(b_root, a_root, rel, is_dir, preserve_metadata)
+
+            # Then copy files (copy method handles both, but ordering helps for deep paths)
+            # (Already handled in _copy_local_path)
+
+            # Deletions last
+            for rel, is_dir in actions_del_a:
+                self._delete_local_path(a_root, rel, is_dir)
+            for rel, is_dir in actions_del_b:
+                self._delete_local_path(b_root, rel, is_dir)
+
+        except Exception as e:
+            self._log(f"[Replicator][BiDi] Execution failed: {e}", level="error")
+            return False
+
+        stats = {
+            "copyAtoB": len(actions_copy_a_to_b),
+            "copyBtoA": len(actions_copy_b_to_a),
+            "delA": len(actions_del_a),
+            "delB": len(actions_del_b),
+            "changedA": len(changed_a),
+            "changedB": len(changed_b),
+            "deletedA": len(deleted_a),
+            "deletedB": len(deleted_b),
+        }
+        self._log(f"[Replicator][BiDi] Actions: {stats}", level="debug")
+
+        # Update run stats if possible
+        if run_id:
+            try:
+                self._db.execute(
+                    "UPDATE runs SET stats=? WHERE id=?",
+                    (json.dumps(stats), run_id),
+                )
+            except Exception:
+                pass
+
+        return True
     """
     Replicator UI + CLI entrypoint.
     Jobs are stored in SQLite database (see ReplicatorDB).
@@ -998,10 +1416,7 @@ class Replicator(QMainWindow):
 
         self._fs = FileSystem(helper=self._helper, logger=self._logger)
 
-        # Only keep configuration jobs for legacy import
-        if self._configuration.get("replicator.jobs") is None:
-            self._configuration.add("replicator.jobs", [], "json", label="Jobs")
-            self._configuration.save()
+        # Legacy configuration jobs bootstrap removed.
 
         # --- Database path setup ---
         # Use Helper.get_cwd() if present, else os.getcwd()
@@ -1019,7 +1434,9 @@ class Replicator(QMainWindow):
 
         self._jobs: List[Dict[str, Any]] = []
         self._table: Optional[QTableWidget] = None
-        self._legacy_import_done = False
+
+        # After DB is ready, log a snapshot of DB layout/counts (non-verbose)
+        self._db_debug_snapshot(verbose=False)
 
     # ------------------------------------------------------------------
     # CLI integration
@@ -1154,7 +1571,6 @@ class Replicator(QMainWindow):
         return rows[0].row()
 
     def _reload_jobs(self):
-        self._maybe_import_legacy_jobs()
         self._jobs = self._db_fetch_jobs()
         self._refresh_table()
 
@@ -1312,6 +1728,8 @@ class Replicator(QMainWindow):
         Returns True if all jobs succeeded.
         """
         self._reload_jobs()
+        # After reloading jobs, log a verbose DB snapshot for debugging
+        self._db_debug_snapshot(verbose=True)
         jobs = self._jobs
         if not jobs:
             self._log("[Replicator] No jobs configured.", level="warning")
@@ -1375,24 +1793,35 @@ class Replicator(QMainWindow):
         except Exception as e:
             self._log(f"[Replicator] Failed to insert run record: {e}", level="warning")
 
-        ok = self._fs.copy(
-            src,
-            dst,
-            preserve_metadata=preserve_metadata,
-            allow_deletion=allow_deletion,
-        )
+        ok = False
+        try:
+            if str(direction).lower() == "bidirectional":
+                ok = self._run_job_bidirectional(job, run_id)
+            else:
+                ok = self._fs.copy(
+                    src,
+                    dst,
+                    preserve_metadata=preserve_metadata,
+                    allow_deletion=allow_deletion,
+                )
+        except NotImplementedError as e:
+            self._log(f"[Replicator] Job '{name}' not supported: {e}", level="error")
+            ok = False
+        except Exception as e:
+            self._log(f"[Replicator] Job '{name}' failed: {e}", level="error")
+            ok = False
 
         # Persist lastRun and lastResult, refresh UI, save to DB
         now_str = datetime.now(timezone.utc).isoformat()
         job["lastRun"] = now_str
         job["lastResult"] = "ok" if ok else "fail"
-        job["lastError"] = None if ok else "Failed"
+        job["lastError"] = None if ok else (job.get("lastError") or "Failed")
         self._db_upsert_job(job)
         if run_id:
             try:
                 self._db.execute(
                     "UPDATE runs SET endedAt = ?, result = ?, message = ? WHERE id = ?",
-                    (now_str, "ok" if ok else "fail", None if ok else "Failed", run_id),
+                    (now_str, "ok" if ok else "fail", None if ok else (job.get("lastError") or "Failed"), run_id),
                 )
             except Exception as e:
                 self._log(f"[Replicator] Failed to update run record: {e}", level="warning")
@@ -1407,6 +1836,58 @@ class Replicator(QMainWindow):
             self._logger.append(msg, level=level, channel=channel)  # type: ignore[call-arg]
         else:
             print(msg)
+
+    def _db_debug_snapshot(self, verbose: bool = False) -> None:
+        """
+        Log a compact snapshot of the current DB layout + row counts.
+        If verbose=True, also logs the most recent rows for key tables.
+        """
+        try:
+            conn = self._db.connect()
+
+            # List tables
+            tables = [r["name"] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+            ).fetchall()]
+
+            self._log(f"[Replicator][DB] Tables: {', '.join(tables) if tables else '(none)'}", level="debug")
+
+            # Layout + counts
+            for t in tables:
+                try:
+                    cols = conn.execute(f"PRAGMA table_info({t})").fetchall()
+                    col_names = [c[1] for c in cols]  # (cid, name, type, notnull, dflt_value, pk)
+                    count = conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                    self._log(f"[Replicator][DB] {t}: columns={len(col_names)} rows={count}", level="debug")
+                    if verbose:
+                        self._log(f"[Replicator][DB] {t}: {', '.join(col_names)}", level="debug")
+                except Exception as e:
+                    self._log(f"[Replicator][DB] Failed introspecting {t}: {e}", level="warning")
+
+            if not verbose:
+                return
+
+            # Recent rows (lightweight, avoid dumping secrets)
+            def _safe_row(row: sqlite3.Row) -> Dict[str, Any]:
+                d = dict(row)
+                # redact sensitive fields if present
+                for k in ("password", "sshKey"):
+                    if k in d and d[k]:
+                        d[k] = "***"
+                return d
+
+            for t, order_col in (("jobs", "id"), ("runs", "id"), ("schedule", "id"), ("conflicts", "id")):
+                if t in tables:
+                    try:
+                        rows = conn.execute(f"SELECT * FROM {t} ORDER BY {order_col} DESC LIMIT 3").fetchall()
+                        self._log(f"[Replicator][DB] {t}: latest {len(rows)} row(s)", level="debug")
+                        for r in rows:
+                            self._log(f"[Replicator][DB] {t}: {_safe_row(r)}", level="debug")
+                    except Exception as e:
+                        self._log(f"[Replicator][DB] Failed reading latest rows from {t}: {e}", level="warning")
+
+        except Exception as e:
+            self._log(f"[Replicator][DB] Snapshot failed: {e}", level="warning")
 
 
 # ------------------------------------------------------------------
@@ -1598,17 +2079,3 @@ class Replicator(QMainWindow):
     def _db_delete_job(self, job_id: int) -> None:
         self._db.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
 
-    def _maybe_import_legacy_jobs(self):
-        if getattr(self, "_legacy_import_done", False):
-            return
-        self._legacy_import_done = True
-        # Only import if jobs table is empty and legacy config has jobs
-        cnt = self._db.query_one("SELECT COUNT(*) AS cnt FROM jobs")
-        if cnt and cnt["cnt"] == 0:
-            jobs = self._configuration.get("replicator.jobs", []) or []
-            if jobs:
-                imported = 0
-                for job in jobs:
-                    self._db_upsert_job(job)
-                    imported += 1
-                self._log(f"[Replicator] Imported {imported} jobs from legacy configuration.", level="info")
