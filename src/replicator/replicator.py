@@ -87,6 +87,21 @@ class ReplicatorDB:
         cur = conn.execute(sql, params)
         return cur.fetchone()
 
+    def get_meta(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        row = self.query_one("SELECT value FROM meta WHERE key = ?", (key,))
+        if not row:
+            return default
+        return row["value"]
+
+    def set_meta(self, key: str, value: Optional[str]) -> None:
+        conn = self.connect()
+        with conn:
+            row = conn.execute("SELECT 1 FROM meta WHERE key = ?", (key,)).fetchone()
+            if row:
+                conn.execute("UPDATE meta SET value = ? WHERE key = ?", (value, key))
+            else:
+                conn.execute("INSERT INTO meta (key, value) VALUES (?, ?)", (key, value))
+
     def ensure_created_and_migrated(self):
         # Ensure parent dir exists
         db_dir = os.path.dirname(self._db_path)
@@ -235,6 +250,16 @@ class ReplicatorDB:
             ("0002_file_state_last_seen", [
                 "ALTER TABLE file_state ADD COLUMN lastSeenAt TEXT NULL;",
                 "ALTER TABLE file_state ADD COLUMN lastSeenRunId INTEGER NULL;",
+            ]),
+            ("0003_meta_kv", [
+                """
+                CREATE TABLE IF NOT EXISTS meta (
+                    key TEXT PRIMARY KEY,
+                    created DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    modified DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    value TEXT NULL
+                );
+                """,
             ]),
         ]
         # Apply migrations in order
@@ -1139,6 +1164,13 @@ class Replicator(QMainWindow):
         note: str = "",
     ) -> None:
         try:
+            # Avoid inserting duplicate open conflicts for the same path/note.
+            existing = self._db.query_one(
+                "SELECT id FROM conflicts WHERE jobId=? AND relPath=? AND status='open' AND COALESCE(note,'')=COALESCE(?, '') ORDER BY id DESC LIMIT 1",
+                (job_id, rel, note or ""),
+            )
+            if existing:
+                return
             self._db.execute(
                 """
                 INSERT INTO conflicts (jobId, runId, relPath, a_size, a_mtime, a_hash, b_size, b_mtime, b_hash, status, note)
@@ -1160,7 +1192,7 @@ class Replicator(QMainWindow):
         except Exception as e:
             self._log(f"[Replicator][DB] Failed to record conflict for '{rel}': {e}", level="warning")
 
-    def _run_job_bidirectional(self, job: Dict[str, Any], run_id: Optional[int]) -> bool:
+    def _run_job_bidirectional(self, job: Dict[str, Any], run_id: Optional[int]) -> tuple[bool, Dict[str, Any]]:
         """Bidirectional sync using `file_state` as the persistent baseline.
 
         Currently implemented for local<->local only.
@@ -1384,7 +1416,7 @@ class Replicator(QMainWindow):
 
         except Exception as e:
             self._log(f"[Replicator][BiDi] Execution failed: {e}", level="error")
-            return False
+            return False, {}
 
         # After actions, scan again and persist final file state as baseline
         final_a = self._scan_local_tree(a_root)
@@ -1414,7 +1446,7 @@ class Replicator(QMainWindow):
             except Exception:
                 pass
 
-        return True
+        return True, stats
     """
     Replicator UI + CLI entrypoint.
     Jobs are stored in SQLite database (see ReplicatorDB).
@@ -1542,7 +1574,7 @@ class Replicator(QMainWindow):
         root.addLayout(actions_row)
 
         # Table
-        self._table = QTableWidget(0, 5, self)
+        self._table = QTableWidget(0, 6, self)
         self._table.setHorizontalHeaderLabels([
             "Name", "Enabled", "Source", "Target", "Last run", "Result"
         ])
@@ -1770,6 +1802,23 @@ class Replicator(QMainWindow):
             ok = self._run_job(job)
             all_ok = all_ok and ok
 
+        # Run DB maintenance at most once per day.
+        try:
+            last = self._db.get_meta("maintenance.lastRunAt")
+            should = True
+            if last:
+                try:
+                    last_dt = datetime.fromisoformat(str(last))
+                    if last_dt.tzinfo is None:
+                        last_dt = last_dt.replace(tzinfo=timezone.utc)
+                    should = (datetime.now(timezone.utc) - last_dt).total_seconds() >= 86400
+                except Exception:
+                    should = True
+            if should:
+                self._db_maintenance()
+        except Exception:
+            pass
+
         return all_ok
 
     def _run_job(self, job: Dict[str, Any]) -> bool:
@@ -1817,6 +1866,7 @@ class Replicator(QMainWindow):
         # Insert a run record at start
         started_at = datetime.now(timezone.utc).isoformat()
         run_id = None
+        bidi_stats = None
         try:
             cur = self._db.execute(
                 "INSERT INTO runs (jobId, startedAt, result) VALUES (?, ?, ?)",
@@ -1826,10 +1876,12 @@ class Replicator(QMainWindow):
         except Exception as e:
             self._log(f"[Replicator] Failed to insert run record: {e}", level="warning")
 
+        record_noop_runs = bool(self._configuration.get("db.recordNoopRuns", False))
+
         ok = False
         try:
             if str(direction).lower() == "bidirectional":
-                ok = self._run_job_bidirectional(job, run_id)
+                ok, bidi_stats = self._run_job_bidirectional(job, run_id)
             else:
                 ok = self._fs.copy(
                     src,
@@ -1843,6 +1895,25 @@ class Replicator(QMainWindow):
         except Exception as e:
             self._log(f"[Replicator] Job '{name}' failed: {e}", level="error")
             ok = False
+
+        # If this was a bidirectional run with no actions/changes, optionally drop the run row.
+        if run_id and bidi_stats is not None and not record_noop_runs:
+            try:
+                noop = (
+                    int(bidi_stats.get("copyAtoB", 0) or 0) == 0
+                    and int(bidi_stats.get("copyBtoA", 0) or 0) == 0
+                    and int(bidi_stats.get("delA", 0) or 0) == 0
+                    and int(bidi_stats.get("delB", 0) or 0) == 0
+                    and int(bidi_stats.get("changedA", 0) or 0) == 0
+                    and int(bidi_stats.get("changedB", 0) or 0) == 0
+                    and int(bidi_stats.get("deletedA", 0) or 0) == 0
+                    and int(bidi_stats.get("deletedB", 0) or 0) == 0
+                )
+                if noop:
+                    self._db.execute("DELETE FROM runs WHERE id = ?", (run_id,))
+                    run_id = None
+            except Exception:
+                pass
 
         # Persist lastRun and lastResult, refresh UI, save to DB
         now_str = datetime.now(timezone.utc).isoformat()
@@ -2118,3 +2189,86 @@ class Replicator(QMainWindow):
     def _db_delete_job(self, job_id: int) -> None:
         self._db.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
 
+
+    def _db_maintenance(self) -> None:
+        """Prune old history and run lightweight SQLite maintenance.
+
+        Safe defaults:
+          - Keep last N runs per job (db.retention.runs.keepLast)
+          - Also prune runs older than X days (db.retention.runs.keepDays)
+          - Keep open conflicts; prune resolved conflicts older than X days
+          - Optionally VACUUM (off by default)
+
+        This is designed to be called periodically (e.g. daily) by the service loop.
+        """
+        try:
+            keep_last = int(self._configuration.get("db.retention.runs.keepLast", 500))
+            keep_days = int(self._configuration.get("db.retention.runs.keepDays", 30))
+            prune_conflict_days = int(self._configuration.get("db.retention.conflicts.keepDays", 90))
+            prune_deleted_state_days = int(self._configuration.get("db.retention.fileState.deletedKeepDays", 30))
+            do_vacuum = bool(self._configuration.get("db.maintenance.vacuum", False))
+        except Exception:
+            keep_last, keep_days = 500, 30
+            prune_conflict_days, prune_deleted_state_days = 90, 30
+            do_vacuum = False
+
+        conn = self._db.connect()
+        now = datetime.now(timezone.utc)
+        now_iso = now.isoformat()
+
+        # Runs: keep last N per job + prune anything older than keep_days
+        try:
+            job_ids = [r[0] for r in conn.execute("SELECT id FROM jobs").fetchall()]
+            with conn:
+                for jid in job_ids:
+                    if keep_last > 0:
+                        conn.execute(
+                            """
+                            DELETE FROM runs
+                            WHERE jobId = ?
+                              AND id NOT IN (
+                                SELECT id FROM runs WHERE jobId = ? ORDER BY id DESC LIMIT ?
+                              )
+                            """,
+                            (jid, jid, keep_last),
+                        )
+
+                if keep_days > 0:
+                    conn.execute(
+                        "DELETE FROM runs WHERE julianday(created) < julianday('now', ?) ",
+                        (f'-{keep_days} days',),
+                    )
+        except Exception as e:
+            self._log(f"[Replicator][DB] Maintenance: runs prune failed: {e}", level="warning")
+
+        # Conflicts: keep all open; prune non-open older than prune_conflict_days
+        try:
+            if prune_conflict_days > 0:
+                with conn:
+                    conn.execute(
+                        "DELETE FROM conflicts WHERE status <> 'open' AND julianday(created) < julianday('now', ?) ",
+                        (f'-{prune_conflict_days} days',),
+                    )
+        except Exception as e:
+            self._log(f"[Replicator][DB] Maintenance: conflicts prune failed: {e}", level="warning")
+
+        # file_state: prune deleted entries that have been deleted for a long time
+        try:
+            if prune_deleted_state_days > 0:
+                with conn:
+                    conn.execute(
+                        "DELETE FROM file_state WHERE deleted = 1 AND deletedAt IS NOT NULL AND julianday(deletedAt) < julianday('now', ?) ",
+                        (f'-{prune_deleted_state_days} days',),
+                    )
+        except Exception as e:
+            self._log(f"[Replicator][DB] Maintenance: file_state prune failed: {e}", level="warning")
+
+        # SQLite maintenance: optimize; optionally vacuum
+        try:
+            conn.execute("PRAGMA optimize;")
+            if do_vacuum:
+                conn.execute("VACUUM;")
+            self._db.set_meta("maintenance.lastRunAt", now_iso)
+            self._log("[Replicator][DB] Maintenance completed.", level="debug")
+        except Exception as e:
+            self._log(f"[Replicator][DB] Maintenance failed: {e}", level="warning")
