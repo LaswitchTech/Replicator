@@ -39,6 +39,7 @@ Contributions to Replicator are welcome! If you have ideas for new features or h
   - ~~**Direction**: Add replication direction (One way, Two way).~~
   - **Scheduling**: Add scheduling capabilities for replication tasks.
   - ~~**Conflict Resolution**: Implement conflict resolution strategies for file changes.~~
+  - ~~**Service Integration**: Integrate with system services for background operation.~~
 
 ## Wait, where is the documentation?
 Review the [Documentation](https://laswitchtech.com/en/blog/projects/pyrdpconnect/index).
