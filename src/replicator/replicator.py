@@ -300,16 +300,6 @@ class JobDialog(QDialog):
         name_row.addWidget(self.name, 1)
         layout.addLayout(name_row)
 
-        # ------------------------------
-        # Enabled row
-        # ------------------------------
-        enabled_row = QHBoxLayout()
-        self.enabled = QCheckBox("Enabled")
-        self.enabled.setChecked(bool(job.get("enabled", True)))
-        enabled_row.addWidget(self.enabled)
-        enabled_row.addStretch(1)
-        layout.addLayout(enabled_row)
-
         # Helper to get endpoint dict from job or fallback
         def _get_endpoint(key_endpoint: str, key_str: str, default_type: str = "local") -> Dict[str, Any]:
             ep = job.get(key_endpoint)
@@ -447,9 +437,12 @@ class JobDialog(QDialog):
         self.allow_deletion.setChecked(bool(job.get("allowDeletion", False)))
         self.preserve_metadata = QCheckBox("Preserve metadata")
         self.preserve_metadata.setChecked(bool(job.get("preserveMetadata", True)))
+        self.enabled = QCheckBox("Enabled")
+        self.enabled.setChecked(bool(job.get("enabled", True)))
         opts_row.addWidget(self.allow_deletion)
         opts_row.addSpacing(16)
         opts_row.addWidget(self.preserve_metadata)
+        opts_row.addWidget(self.enabled)
         opts_row.addStretch(1)
         layout.addLayout(opts_row)
 
