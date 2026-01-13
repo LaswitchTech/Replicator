@@ -1508,7 +1508,7 @@ class Replicator(QMainWindow):
         if candidate and self._helper.file_exists(candidate) and candidate.lower().endswith(".png"):
             pm = QPixmap(candidate)
             if not pm.isNull():
-                logo.setPixmap(pm.scaled(96, 96, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                logo.setPixmap(pm.scaled(256, 256, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         else:
             logo.setText("Replicator")
             logo.setStyleSheet("font-size: 22px; font-weight: 600;")
