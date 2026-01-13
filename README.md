@@ -8,7 +8,7 @@
 ![Version](https://img.shields.io/github/v/release/LaswitchTech/Replicator?label=Version&style=for-the-badge)
 
 ## Description
-Replicator is a cross-platform Python application designed to provide replication services similar to Windows DFSR. It supports local filesystems, SMB, and FTP, making it a versatile solution for data replication needs across different operating systems.
+Replicator is a cross-platform Python application designed to provide replication services similar to Windows DFSR. It supports local filesystems, SMB, FTP and SSHFS, making it a versatile solution for data replication needs across different operating systems.
 
 ## Features
   - **Cross-Platform Compatibility**: Replicator is compatible with Windows, macOS and Linux, with specific adjustments made to ensure seamless operation on both operating systems.
@@ -30,14 +30,15 @@ Contributions to Replicator are welcome! If you have ideas for new features or h
   - **Submit a Pull Request**: Once your changes are ready, submit a pull request to the main repository.
 
 ## To Do
-  - **Support for Local**: Add support for Local filesystems.
+  - ~~**Support for Local**: Add support for Local filesystems.~~
   - **Support for SMB**: Add support for SMB Shares.
   - **Support for FTP**: Add support for FTP Shares.
-  - **Mode Mirror**: Add replication mode Mirror.
+  - **Support for SSHFS**: Add support for SSH filesystems.
+  - ~~**Mode Mirror**: Add replication mode Mirror.~~
   - **Mode Incremental**: Add replication mode Incremental.
-  - **Direction**: Add replication direction (One way, Two way).
+  - ~~**Direction**: Add replication direction (One way, Two way).~~
   - **Scheduling**: Add scheduling capabilities for replication tasks.
-  - **Conflict Resolution**: Implement conflict resolution strategies for file changes.
+  - ~~**Conflict Resolution**: Implement conflict resolution strategies for file changes.~~
 
 ## Wait, where is the documentation?
 Review the [Documentation](https://laswitchtech.com/en/blog/projects/pyrdpconnect/index).
