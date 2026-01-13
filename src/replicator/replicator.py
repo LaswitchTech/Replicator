@@ -1477,6 +1477,7 @@ class Replicator(QMainWindow):
         if cli is None:
             return
         cli.add("run", "Run all replication jobs.", self.run)
+        cli.service.add("run", "Run all replication jobs.", self.run)
 
     # ------------------------------------------------------------------
     # UI
