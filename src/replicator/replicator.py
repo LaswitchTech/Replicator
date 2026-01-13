@@ -300,6 +300,16 @@ class JobDialog(QDialog):
         name_row.addWidget(self.name, 1)
         layout.addLayout(name_row)
 
+        # ------------------------------
+        # Enabled row
+        # ------------------------------
+        enabled_row = QHBoxLayout()
+        self.enabled = QCheckBox("Enabled")
+        self.enabled.setChecked(bool(job.get("enabled", True)))
+        enabled_row.addWidget(self.enabled)
+        enabled_row.addStretch(1)
+        layout.addLayout(enabled_row)
+
         # Helper to get endpoint dict from job or fallback
         def _get_endpoint(key_endpoint: str, key_str: str, default_type: str = "local") -> Dict[str, Any]:
             ep = job.get(key_endpoint)
@@ -913,6 +923,7 @@ class JobDialog(QDialog):
             "preserveMetadata": bool(self.preserve_metadata.isChecked()),
             "mode": self.mode.currentText(),
             "direction": self.direction.currentText(),
+            "enabled": bool(self.enabled.isChecked()),
         }
 
         # Preserve schedule fields if they existed previously
@@ -1537,9 +1548,9 @@ class Replicator(QMainWindow):
         root.addLayout(actions_row)
 
         # Table
-        self._table = QTableWidget(0, 10, self)
+        self._table = QTableWidget(0, 5, self)
         self._table.setHorizontalHeaderLabels([
-            "Name", "Source", "Target", "Mode", "Direction", "Delete", "Metadata", "Schedule", "Last run", "Result"
+            "Name", "Enabled", "Source", "Target", "Last run", "Result"
         ])
         self._table.setSelectionBehavior(QTableWidget.SelectRows)
         self._table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -1618,6 +1629,7 @@ class Replicator(QMainWindow):
                 return item
 
             self._table.setItem(r, 0, _it(job.get("name", "")))
+            self._table.setItem(r, 1, _it("On" if job.get("enabled", True) else "Off"))
             # Source column
             src_str = ""
             src_ep = job.get("sourceEndpoint")
@@ -1625,7 +1637,7 @@ class Replicator(QMainWindow):
                 src_str = f"{src_ep.get('type', 'local')}:{src_ep.get('location', '')}"
             else:
                 src_str = job.get("source", "")
-            self._table.setItem(r, 1, _it(src_str))
+            self._table.setItem(r, 2, _it(src_str))
             # Target column
             tgt_str = ""
             tgt_ep = job.get("targetEndpoint")
@@ -1633,27 +1645,17 @@ class Replicator(QMainWindow):
                 tgt_str = f"{tgt_ep.get('type', 'local')}:{tgt_ep.get('location', '')}"
             else:
                 tgt_str = job.get("target", "")
-            self._table.setItem(r, 2, _it(tgt_str))
-            self._table.setItem(r, 3, _it(job.get("mode", "mirror")))
-            self._table.setItem(r, 4, _it(job.get("direction", "unidirectional")))
-            self._table.setItem(r, 5, _it("Yes" if job.get("allowDeletion") else "No"))
-            self._table.setItem(r, 6, _it("Yes" if job.get("preserveMetadata", True) else "No"))
-            sched = job.get("schedule")
-            if not sched or not sched.get("enabled", False):
-                sched_str = "Off"
-            else:
-                sched_str = f"Every {sched.get('everyMinutes', 60)} min"
-            self._table.setItem(r, 7, _it(sched_str))
-            # Last run (column 8)
+            self._table.setItem(r, 3, _it(tgt_str))
+            # Last run (column 5)
             last_run = job.get("lastRun")
             if last_run:
                 last_run_str = last_run
             else:
                 last_run_str = "Never"
-            self._table.setItem(r, 8, _it(last_run_str))
-            # Last result (column 9)
+            self._table.setItem(r, 4, _it(last_run_str))
+            # Last result (column 6)
             last_result = job.get("lastResult", "")
-            self._table.setItem(r, 9, _it(last_result))
+            self._table.setItem(r, 5, _it(last_result))
 
     def _add_job(self):
         dlg = JobDialog(self)
@@ -1752,8 +1754,15 @@ class Replicator(QMainWindow):
         Returns True if all jobs succeeded.
         """
         self._reload_jobs()
-        # After reloading jobs, log a verbose DB snapshot for debugging
-        self._db_debug_snapshot(verbose=True)
+        # After reloading jobs, log a DB snapshot for debugging.
+        # Only log verbose DB details when log.verbose is enabled.
+        verbose_db = False
+        try:
+            verbose_db = bool(self._configuration.get("log.verbose", False))
+        except Exception:
+            verbose_db = False
+
+        self._db_debug_snapshot(verbose=verbose_db)
         jobs = self._jobs
         if not jobs:
             self._log("[Replicator] No jobs configured.", level="warning")
@@ -1761,6 +1770,9 @@ class Replicator(QMainWindow):
 
         all_ok = True
         for job in jobs:
+            if not bool(job.get("enabled", True)):
+                self._log(f"[Replicator] Skipping disabled job '{job.get('name') or 'Unnamed'}'.", level="info")
+                continue
             ok = self._run_job(job)
             all_ok = all_ok and ok
 
@@ -1768,6 +1780,9 @@ class Replicator(QMainWindow):
 
     def _run_job(self, job: Dict[str, Any]) -> bool:
         name = job.get("name") or "Unnamed"
+        if not bool(job.get("enabled", True)):
+            self._log(f"[Replicator] Job '{name}' is disabled; skipping.", level="info")
+            return True
         job_id = job.get("id")
         # Determine src/dst and types
         src_ep = job.get("sourceEndpoint")
@@ -1924,6 +1939,8 @@ class Replicator(QMainWindow):
         for row in rows:
             job = dict(row)
             job["id"] = row["id"]
+            enabled_val = row["enabled"] if "enabled" in row.keys() else 1
+            job["enabled"] = bool(enabled_val)
             # Endpoints
             eps = self._db.query_all("SELECT * FROM endpoints WHERE jobId = ?", (row["id"],))
             for ep in eps:
@@ -1982,6 +1999,10 @@ class Replicator(QMainWindow):
         return jobs
 
     def _db_upsert_job(self, job: Dict[str, Any]) -> int:
+
+        # Normalize enabled
+        enabled = 1 if bool(job.get("enabled", True)) else 0
+
         # Insert or update jobs row, endpoints, schedule (transaction)
         conn = self._db.connect()
         with conn:
@@ -1992,7 +2013,7 @@ class Replicator(QMainWindow):
             ]
             values = [
                 job.get("name"),
-                1 if job.get("enabled", True) else 0,
+                enabled,
                 job.get("mode", "mirror"),
                 job.get("direction", "unidirectional"),
                 1 if job.get("allowDeletion", False) else 0,
