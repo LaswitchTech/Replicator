@@ -6,7 +6,6 @@ from __future__ import annotations
 from typing import Optional, Any, Dict, List
 
 import os
-import sqlite3
 import json
 import shutil
 
@@ -29,6 +28,8 @@ from PyQt5.QtWidgets import (
 )
 
 from .ui import JobDialog, ScheduleDialog
+from .migration import Migration
+from .job import Job, Endpoint, Schedule, JobStore
 
 try:
     from core.helper import Helper
@@ -45,249 +46,6 @@ except ImportError:
     from filesystem.filesystem import FileSystem
     from database.sqlite import SQLite
 
-# ------------------------------------------------------------------
-# ReplicatorDB: SQLite storage/migrations
-# ------------------------------------------------------------------
-class ReplicatorDB:
-    def __init__(self, db_path: str):
-        self._db_path = db_path
-        self._conn: Optional[sqlite3.Connection] = None
-
-    def connect(self):
-        if self._conn is not None:
-            return self._conn
-        conn = sqlite3.connect(self._db_path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
-        self._conn = conn
-        return conn
-
-    def execute(self, sql: str, params: tuple = ()):
-        conn = self.connect()
-        cur = conn.execute(sql, params)
-        conn.commit()
-        return cur
-
-    def query_all(self, sql: str, params: tuple = ()) -> List[sqlite3.Row]:
-        conn = self.connect()
-        cur = conn.execute(sql, params)
-        return cur.fetchall()
-
-    def query_one(self, sql: str, params: tuple = ()) -> Optional[sqlite3.Row]:
-        conn = self.connect()
-        cur = conn.execute(sql, params)
-        return cur.fetchone()
-
-    def get_meta(self, key: str, default: Optional[str] = None) -> Optional[str]:
-        row = self.query_one("SELECT value FROM meta WHERE key = ?", (key,))
-        if not row:
-            return default
-        return row["value"]
-
-    def set_meta(self, key: str, value: Optional[str]) -> None:
-        conn = self.connect()
-        with conn:
-            row = conn.execute("SELECT 1 FROM meta WHERE key = ?", (key,)).fetchone()
-            if row:
-                conn.execute("UPDATE meta SET value = ? WHERE key = ?", (value, key))
-            else:
-                conn.execute("INSERT INTO meta (key, value) VALUES (?, ?)", (key, value))
-
-    def ensure_created_and_migrated(self):
-        # Ensure parent dir exists
-        db_dir = os.path.dirname(self._db_path)
-        os.makedirs(db_dir, exist_ok=True)
-        conn = self.connect()
-        # Schema migrations table
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS schema_migrations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            created DATETIME DEFAULT CURRENT_TIMESTAMP,
-            modified DATETIME DEFAULT CURRENT_TIMESTAMP,
-            name TEXT NOT NULL UNIQUE
-        );
-        """)
-        # Try to create modified trigger for schema_migrations (best effort)
-        try:
-            conn.execute("""
-            CREATE TRIGGER trg_schema_migrations_modified
-            BEFORE UPDATE ON schema_migrations
-            FOR EACH ROW
-            BEGIN
-                UPDATE schema_migrations SET modified = CURRENT_TIMESTAMP WHERE id = OLD.id;
-            END;
-            """)
-        except Exception:
-            pass
-
-        # List of migrations (name, list-of-sql)
-        migrations = [
-            ("0001_init", [
-                # jobs
-                """
-                CREATE TABLE IF NOT EXISTS jobs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    created DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    modified DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    name TEXT NOT NULL,
-                    enabled INTEGER NOT NULL DEFAULT 1,
-                    mode TEXT NOT NULL DEFAULT 'mirror',
-                    direction TEXT NOT NULL DEFAULT 'unidirectional',
-                    allowDeletion INTEGER NOT NULL DEFAULT 0,
-                    preserveMetadata INTEGER NOT NULL DEFAULT 1,
-                    pairId TEXT NULL,
-                    conflictPolicy TEXT NOT NULL DEFAULT 'newest',
-                    lastRun TEXT NULL,
-                    lastResult TEXT NULL,
-                    lastError TEXT NULL
-                );
-                """,
-                "CREATE INDEX IF NOT EXISTS idx_jobs_enabled ON jobs(enabled);",
-                # endpoints
-                """
-                CREATE TABLE IF NOT EXISTS endpoints (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    created DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    modified DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    jobId INTEGER NOT NULL,
-                    role TEXT NOT NULL,
-                    type TEXT NOT NULL,
-                    location TEXT NOT NULL,
-                    port INTEGER NULL,
-                    guest INTEGER NOT NULL DEFAULT 1,
-                    username TEXT NULL,
-                    password TEXT NULL,
-                    useKey INTEGER NOT NULL DEFAULT 0,
-                    sshKey TEXT NULL,
-                    options TEXT NULL,
-                    FOREIGN KEY(jobId) REFERENCES jobs(id) ON DELETE CASCADE
-                );
-                """,
-                "CREATE UNIQUE INDEX IF NOT EXISTS uq_endpoints_job_role ON endpoints(jobId, role);",
-                # schedule
-                """
-                CREATE TABLE IF NOT EXISTS schedule (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    created DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    modified DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    jobId INTEGER NOT NULL UNIQUE,
-                    enabled INTEGER NOT NULL DEFAULT 0,
-                    everyMinutes INTEGER NOT NULL DEFAULT 60,
-                    nextRunAt TEXT NULL,
-                    lastScheduledRunAt TEXT NULL,
-                    FOREIGN KEY(jobId) REFERENCES jobs(id) ON DELETE CASCADE
-                );
-                """,
-                # runs
-                """
-                CREATE TABLE IF NOT EXISTS runs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    created DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    modified DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    jobId INTEGER NOT NULL,
-                    startedAt TEXT NOT NULL,
-                    endedAt TEXT NULL,
-                    result TEXT NOT NULL,
-                    message TEXT NULL,
-                    stats TEXT NULL,
-                    FOREIGN KEY(jobId) REFERENCES jobs(id) ON DELETE CASCADE
-                );
-                """,
-                "CREATE INDEX IF NOT EXISTS idx_runs_job_started ON runs(jobId, startedAt);",
-                # file_state
-                """
-                CREATE TABLE IF NOT EXISTS file_state (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    created DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    modified DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    jobId INTEGER NOT NULL,
-                    side TEXT NOT NULL,
-                    relPath TEXT NOT NULL,
-                    size INTEGER NOT NULL DEFAULT 0,
-                    mtime INTEGER NOT NULL DEFAULT 0,
-                    hash TEXT NULL,
-                    isDir INTEGER NOT NULL DEFAULT 0,
-                    deleted INTEGER NOT NULL DEFAULT 0,
-                    deletedAt TEXT NULL,
-                    meta TEXT NULL,
-                    FOREIGN KEY(jobId) REFERENCES jobs(id) ON DELETE CASCADE
-                );
-                """,
-                "CREATE UNIQUE INDEX IF NOT EXISTS uq_file_state ON file_state(jobId, side, relPath);",
-                # conflicts
-                """
-                CREATE TABLE IF NOT EXISTS conflicts (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    created DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    modified DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    jobId INTEGER NOT NULL,
-                    runId INTEGER NULL,
-                    relPath TEXT NOT NULL,
-                    a_size INTEGER NULL,
-                    a_mtime INTEGER NULL,
-                    a_hash TEXT NULL,
-                    b_size INTEGER NULL,
-                    b_mtime INTEGER NULL,
-                    b_hash TEXT NULL,
-                    status TEXT NOT NULL DEFAULT 'open',
-                    resolution TEXT NULL,
-                    note TEXT NULL,
-                    FOREIGN KEY(jobId) REFERENCES jobs(id) ON DELETE CASCADE,
-                    FOREIGN KEY(runId) REFERENCES runs(id) ON DELETE SET NULL
-                );
-                """,
-                "CREATE INDEX IF NOT EXISTS idx_conflicts_job_status ON conflicts(jobId, status);",
-            ]),
-            ("0002_file_state_last_seen", [
-                "ALTER TABLE file_state ADD COLUMN lastSeenAt TEXT NULL;",
-                "ALTER TABLE file_state ADD COLUMN lastSeenRunId INTEGER NULL;",
-            ]),
-            ("0003_meta_kv", [
-                """
-                CREATE TABLE IF NOT EXISTS meta (
-                    key TEXT PRIMARY KEY,
-                    created DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    modified DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    value TEXT NULL
-                );
-                """,
-            ]),
-        ]
-        # Apply migrations in order
-        for name, stmts in migrations:
-            row = conn.execute("SELECT 1 FROM schema_migrations WHERE name = ?", (name,)).fetchone()
-            if not row:
-                try:
-                    with conn:
-                        for stmt in stmts:
-                            conn.execute(stmt)
-                        conn.execute("INSERT INTO schema_migrations (name) VALUES (?)", (name,))
-                except Exception as e:
-                    raise RuntimeError(f"Failed to apply migration {name}: {e}")
-        # Create modified triggers for all tables (best effort)
-        for tbl in ["jobs", "endpoints", "schedule", "runs", "file_state", "conflicts"]:
-            try:
-                self._ensure_modified_trigger(tbl)
-            except Exception:
-                pass
-
-    def _ensure_modified_trigger(self, table_name: str):
-        # Try to create a BEFORE UPDATE trigger to set modified = CURRENT_TIMESTAMP
-        conn = self.connect()
-        trig_name = f"trg_{table_name}_modified"
-        # Try to drop if exists (to avoid duplicate triggers on repeated runs)
-        try:
-            conn.execute(f"DROP TRIGGER IF EXISTS {trig_name};")
-        except Exception:
-            pass
-        conn.execute(f"""
-        CREATE TRIGGER {trig_name}
-        BEFORE UPDATE ON {table_name}
-        FOR EACH ROW
-        BEGIN
-            UPDATE {table_name} SET modified = CURRENT_TIMESTAMP WHERE id = OLD.id;
-        END;
-        """)
 
 
 class Replicator(QMainWindow):
@@ -351,58 +109,59 @@ class Replicator(QMainWindow):
         return out
 
     def _load_prev_file_state(self, job_id: int, side: str) -> Dict[str, Dict[str, Any]]:
-        rows = self._db.query_all(
+        rows = self._db.query(
             "SELECT relPath, size, mtime, isDir, deleted, deletedAt, lastSeenAt, lastSeenRunId FROM file_state WHERE jobId=? AND side=?",
             (job_id, side),
         )
         prev: Dict[str, Dict[str, Any]] = {}
-        for r in rows:
-            prev[str(r["relPath"])] = {
-                "size": int(r["size"] or 0),
-                "mtime": int(r["mtime"] or 0),
-                "isDir": bool(r["isDir"]),
-                "deleted": bool(r["deleted"]),
-                "deletedAt": r["deletedAt"],
-                "lastSeenAt": r["lastSeenAt"],
-                "lastSeenRunId": r["lastSeenRunId"],
+        for r in rows or []:
+            prev[str(r.get("relPath"))] = {
+                "size": int(r.get("size") or 0),
+                "mtime": int(r.get("mtime") or 0),
+                "isDir": bool(r.get("isDir")),
+                "deleted": bool(r.get("deleted")),
+                "deletedAt": r.get("deletedAt"),
+                "lastSeenAt": r.get("lastSeenAt"),
+                "lastSeenRunId": r.get("lastSeenRunId"),
             }
         return prev
 
     def _persist_file_state(self, job_id: int, side: str, cur: Dict[str, Dict[str, Any]], run_id: Optional[int]) -> None:
-        """Upsert current snapshot into file_state and mark missing as deleted, using lastSeenAt/lastSeenRunId."""
-        conn = self._db.connect()
+        # Use wrapper transaction; no raw connection needed.
         now_iso = datetime.now(timezone.utc).isoformat()
-        with conn:
+        with self._db.transaction():
             # Upsert all current entries
             for rel, meta in cur.items():
                 is_dir = 1 if meta.get("isDir") else 0
                 size = int(meta.get("size", 0) or 0)
                 mtime = int(meta.get("mtime", 0) or 0)
-                row = conn.execute(
+
+                exists = self._db.scalar(
                     "SELECT id FROM file_state WHERE jobId=? AND side=? AND relPath=?",
                     (job_id, side, rel),
-                ).fetchone()
-                if row:
-                    conn.execute(
+                )
+                if exists:
+                    self._db.execute(
                         "UPDATE file_state SET size=?, mtime=?, isDir=?, deleted=0, deletedAt=NULL, lastSeenAt=?, lastSeenRunId=? WHERE jobId=? AND side=? AND relPath=?",
                         (size, mtime, is_dir, now_iso, run_id, job_id, side, rel),
                     )
                 else:
-                    conn.execute(
+                    self._db.execute(
                         "INSERT INTO file_state (jobId, side, relPath, size, mtime, isDir, deleted, deletedAt, lastSeenAt, lastSeenRunId) VALUES (?,?,?,?,?,?,0,NULL,?,?)",
                         (job_id, side, rel, size, mtime, is_dir, now_iso, run_id),
                     )
+
             # Mark missing as deleted (single UPDATE)
             rels = list(cur.keys())
             if rels:
                 placeholders = ",".join(["?"] * len(rels))
-                conn.execute(
+                self._db.execute(
                     f"UPDATE file_state SET deleted=1, deletedAt=COALESCE(deletedAt, ?) WHERE jobId=? AND side=? AND deleted=0 AND relPath NOT IN ({placeholders})",
                     (now_iso, job_id, side, *rels),
                 )
             else:
                 # cur is empty: mark all as deleted for this job/side
-                conn.execute(
+                self._db.execute(
                     "UPDATE file_state SET deleted=1, deletedAt=COALESCE(deletedAt, ?) WHERE jobId=? AND side=? AND deleted=0",
                     (now_iso, job_id, side),
                 )
@@ -453,7 +212,7 @@ class Replicator(QMainWindow):
     ) -> None:
         try:
             # Avoid inserting duplicate open conflicts for the same path/note.
-            existing = self._db.query_one(
+            existing = self._db.one(
                 "SELECT id FROM conflicts WHERE jobId=? AND relPath=? AND status='open' AND COALESCE(note,'')=COALESCE(?, '') ORDER BY id DESC LIMIT 1",
                 (job_id, rel, note or ""),
             )
@@ -775,12 +534,18 @@ class Replicator(QMainWindow):
         data_dir = os.path.join(base_dir, "data")
         db_path = os.path.join(data_dir, "replicator.db")
 
-        self._db = ReplicatorDB(db_path)
-        self._db.ensure_created_and_migrated()
-        self._log(f"[Replicator] Database: {db_path}", level="debug")
-        self._log(f"[Replicator] Database migrations applied.", level="info")
+        # --- Database (corePY SQLite wrapper) + migrations ---
+        self._db = SQLite(db_path=db_path)
+        self._migration = Migration(self._db, logger=self._logger)
+        self._migration.ensure()
 
-        self._jobs: List[Dict[str, Any]] = []
+        self._store = JobStore(self._db)
+
+        self._log(f"[Replicator] Database: {db_path}", level="debug")
+        self._log("[Replicator] Database migrations applied.", level="info")
+
+        # Domain jobs (Job objects)
+        self._jobs: List[Job] = []
         self._table: Optional[QTableWidget] = None
 
         # After DB is ready, log a snapshot of DB layout/counts (non-verbose)
@@ -920,13 +685,11 @@ class Replicator(QMainWindow):
         return rows[0].row()
 
     def _reload_jobs(self):
-        self._jobs = self._db_fetch_jobs()
+        self._jobs = self._store.fetch_all()
         self._refresh_table()
 
     def _save_jobs(self):
-        # No longer persists to config; upsert all jobs to DB (used by legacy code)
-        for job in self._jobs:
-            self._db_upsert_job(job)
+        return
 
     def _refresh_table(self):
         if not self._table:
@@ -942,42 +705,66 @@ class Replicator(QMainWindow):
                 item.setFlags(item.flags() ^ Qt.ItemIsEditable)
                 return item
 
-            self._table.setItem(r, 0, _it(job.get("name", "")))
-            self._table.setItem(r, 1, _it("On" if job.get("enabled", True) else "Off"))
-            # Source column
-            src_str = ""
-            src_ep = job.get("sourceEndpoint")
-            if isinstance(src_ep, dict):
-                src_str = f"{src_ep.get('type', 'local')}:{src_ep.get('location', '')}"
-            else:
-                src_str = job.get("source", "")
+            self._table.setItem(r, 0, _it(job.name))
+            self._table.setItem(r, 1, _it("On" if job.enabled else "Off"))
+
+            src_str = f"{job.sourceEndpoint.type}:{job.sourceEndpoint.location}"
+            tgt_str = f"{job.targetEndpoint.type}:{job.targetEndpoint.location}"
             self._table.setItem(r, 2, _it(src_str))
-            # Target column
-            tgt_str = ""
-            tgt_ep = job.get("targetEndpoint")
-            if isinstance(tgt_ep, dict):
-                tgt_str = f"{tgt_ep.get('type', 'local')}:{tgt_ep.get('location', '')}"
-            else:
-                tgt_str = job.get("target", "")
             self._table.setItem(r, 3, _it(tgt_str))
-            # Last run (column 5)
-            last_run = job.get("lastRun")
-            if last_run:
-                last_run_str = last_run
-            else:
-                last_run_str = "Never"
-            self._table.setItem(r, 4, _it(last_run_str))
-            # Last result (column 6)
-            last_result = job.get("lastResult", "")
-            self._table.setItem(r, 5, _it(last_result))
+
+            last_run = job.lastRun
+            self._table.setItem(r, 4, _it(last_run if last_run else "Never"))
+
+            self._table.setItem(r, 5, _it(job.lastResult or ""))
+
+    def _job_from_legacy_dict(self, d: Dict[str, Any], *, existing_id: Optional[int] = None) -> Job:
+        src = d.get("sourceEndpoint") or {"type": "local", "location": d.get("source", ""), "auth": {}}
+        tgt = d.get("targetEndpoint") or {"type": "local", "location": d.get("target", ""), "auth": {}}
+        sched = d.get("schedule") or {}
+
+        j = Job(
+            id=existing_id,
+            name=str(d.get("name") or ""),
+            enabled=bool(d.get("enabled", True)),
+            mode=str(d.get("mode") or "mirror"),
+            direction=str(d.get("direction") or "unidirectional"),
+            allowDeletion=bool(d.get("allowDeletion", False)),
+            preserveMetadata=bool(d.get("preserveMetadata", True)),
+            conflictPolicy=str(d.get("conflictPolicy") or "newest"),
+            pairId=d.get("pairId"),
+            lastRun=d.get("lastRun"),
+            lastResult=d.get("lastResult"),
+            lastError=d.get("lastError"),
+        )
+
+        j.sourceEndpoint = Endpoint(
+            type=str(src.get("type") or "local"),
+            location=str(src.get("location") or ""),
+            auth=dict(src.get("auth") or {}),
+        )
+        j.targetEndpoint = Endpoint(
+            type=str(tgt.get("type") or "local"),
+            location=str(tgt.get("location") or ""),
+            auth=dict(tgt.get("auth") or {}),
+        )
+
+        windows = sched.get("windows") if isinstance(sched.get("windows"), dict) else {}
+        j.schedule = Schedule(
+            enabled=bool(sched.get("enabled", False)),
+            everyMinutes=int(sched.get("everyMinutes", 60) or 60),
+            windows=windows,
+        )
+
+        return j
 
     def _add_job(self):
         dlg = JobDialog(self)
         if dlg.exec_() == QDialog.Accepted:
-            new_job = dlg.value()
-            job_id = self._db_upsert_job(new_job)
-            new_job["id"] = job_id
-            self._jobs.append(new_job)
+            new_job_dict = dlg.value()
+            job_obj = self._job_from_legacy_dict(new_job_dict)
+            job_id = self._store.upsert(job_obj)
+            job_obj.id = job_id
             self._reload_jobs()
 
     def _edit_job(self):
@@ -985,12 +772,13 @@ class Replicator(QMainWindow):
         if idx < 0:
             MsgBox.show(self, "Jobs", "Select a job to edit.", icon="info")
             return
-        dlg = JobDialog(self, self._jobs[idx])
+
+        current = self._jobs[idx]
+        dlg = JobDialog(self, current.to_legacy_dict())
         if dlg.exec_() == QDialog.Accepted:
-            updated_job = dlg.value()
-            # preserve id
-            updated_job["id"] = self._jobs[idx].get("id")
-            self._db_upsert_job(updated_job)
+            updated_dict = dlg.value()
+            job_obj = self._job_from_legacy_dict(updated_dict, existing_id=current.id)
+            self._store.upsert(job_obj)
             self._reload_jobs()
 
     def _duplicate_job(self):
@@ -998,43 +786,38 @@ class Replicator(QMainWindow):
         if idx < 0:
             MsgBox.show(self, "Jobs", "Select a job to duplicate.", icon="info")
             return
-        orig_job = self._jobs[idx]
-        new_job = dict(orig_job)
-        # Deep copy schedule if present
-        if "schedule" in orig_job and isinstance(orig_job["schedule"], dict):
-            new_job["schedule"] = dict(orig_job["schedule"])
-        name = new_job.get("name")
-        if name:
-            new_job["name"] = f"{name} (copy)"
-        else:
-            new_job["name"] = "Copy"
-        if "id" in new_job:
-            del new_job["id"]
-        job_id = self._db_upsert_job(new_job)
-        new_job["id"] = job_id
+
+        orig = self._jobs[idx]
+        d = orig.to_legacy_dict()
+        d.pop("id", None)
+        d["name"] = f"{orig.name} (copy)" if orig.name else "Copy"
+
+        job_obj = self._job_from_legacy_dict(d)
+        self._store.upsert(job_obj)
         self._reload_jobs()
-        # Select the new row
+
         if self._table:
-            new_row = self._table.rowCount() - 1
-            self._table.selectRow(new_row)
+            # Select the newest row (best-effort)
+            self._table.selectRow(self._table.rowCount() - 1)
 
     def _delete_job(self):
         idx = self._selected_index()
         if idx < 0:
             MsgBox.show(self, "Jobs", "Select a job to delete.", icon="info")
             return
+
+        job = self._jobs[idx]
         choice = MsgBox.show(
             self,
             title="Delete",
-            message=f"Delete job '{self._jobs[idx].get('name', '')}'?",
+            message=f"Delete job '{job.name}'?",
             icon="question",
             buttons=("Cancel", "Delete"),
             default="Cancel",
         )
         if choice == "Delete":
-            job_id = self._jobs[idx].get("id")
-            if job_id:
-                self._db_delete_job(job_id)
+            if job.id:
+                self._store.delete(int(job.id))
             self._reload_jobs()
 
     def _edit_schedule(self):
@@ -1042,11 +825,14 @@ class Replicator(QMainWindow):
         if idx < 0:
             MsgBox.show(self, "Jobs", "Select a job to edit schedule.", icon="info")
             return
-        dlg = ScheduleDialog(self, job=self._jobs[idx])
+
+        current = self._jobs[idx]
+        dlg = ScheduleDialog(self, job=current.to_legacy_dict())
         if dlg.exec_() == QDialog.Accepted:
-            job = self._jobs[idx]
-            job["schedule"] = dlg.value()
-            self._db_upsert_job(job)
+            d = current.to_legacy_dict()
+            d["schedule"] = dlg.value()
+            job_obj = self._job_from_legacy_dict(d, existing_id=current.id)
+            self._store.upsert(job_obj)
             self._reload_jobs()
 
     def _run_with_ui_feedback(self):
@@ -1077,22 +863,22 @@ class Replicator(QMainWindow):
             verbose_db = False
 
         self._db_debug_snapshot(verbose=verbose_db)
-        jobs = self._jobs
+        jobs: List[Job] = self._jobs
         if not jobs:
             self._log("[Replicator] No jobs configured.", level="warning")
             return False
 
         all_ok = True
         for job in jobs:
-            if not bool(job.get("enabled", True)):
-                self._log(f"[Replicator] Skipping disabled job '{job.get('name') or 'Unnamed'}'.", level="info")
+            if not bool(job.enabled):
+                self._log(f"[Replicator] Skipping disabled job '{job.name or 'Unnamed'}'.", level="info")
                 continue
             ok = self._run_job(job)
             all_ok = all_ok and ok
 
         # Run DB maintenance at most once per day.
         try:
-            last = self._db.get_meta("maintenance.lastRunAt")
+            last = self._migration.get_meta("maintenance.lastRunAt")
             should = True
             if last:
                 try:
@@ -1109,46 +895,31 @@ class Replicator(QMainWindow):
 
         return all_ok
 
-    def _run_job(self, job: Dict[str, Any]) -> bool:
-        name = job.get("name") or "Unnamed"
-        if not bool(job.get("enabled", True)):
+    def _run_job(self, job: Job) -> bool:
+        name = job.name or "Unnamed"
+        if not bool(job.enabled):
             self._log(f"[Replicator] Job '{name}' is disabled; skipping.", level="info")
             return True
-        job_id = job.get("id")
-        # Determine src/dst and types
-        src_ep = job.get("sourceEndpoint")
-        if isinstance(src_ep, dict):
-            src = src_ep.get("location", "")
-            src_type = src_ep.get("type", "local")
-        else:
-            src = job.get("source") or ""
-            src_type = "local"
-        dst_ep = job.get("targetEndpoint")
-        if isinstance(dst_ep, dict):
-            dst = dst_ep.get("location", "")
-            dst_type = dst_ep.get("type", "local")
-        else:
-            dst = job.get("target") or ""
-            dst_type = "local"
-        allow_deletion = bool(job.get("allowDeletion", False))
-        preserve_metadata = bool(job.get("preserveMetadata", True))
-        mode = job.get("mode", "mirror")
-        direction = job.get("direction", "unidirectional")
-        schedule = job.get("schedule", {})
+        job_id = job.id
+        src = job.sourceEndpoint.location
+        src_type = job.sourceEndpoint.type
+        dst = job.targetEndpoint.location
+        dst_type = job.targetEndpoint.type
+        allow_deletion = bool(job.allowDeletion)
+        preserve_metadata = bool(job.preserveMetadata)
+        mode = job.mode
+        direction = job.direction
+        schedule = job.schedule.__dict__ if job.schedule else {}
 
         if not src or not dst:
             self._log(f"[Replicator] Job '{name}' invalid: missing source/target.", level="error")
             return False
 
         sched_str = ""
-        if schedule.get("enabled", False):
-            sched_str = f", schedule=Every {schedule.get('everyMinutes', 60)} min"
+        if getattr(job.schedule, "enabled", False):
+            sched_str = f", schedule=Every {getattr(job.schedule, 'everyMinutes', 60)} min"
         logline = f"[Replicator] Running job '{name}': {src} -> {dst} (mode={mode}, direction={direction}, delete={allow_deletion}, meta={preserve_metadata}{sched_str}"
-        if isinstance(src_ep, dict):
-            logline += f", srcType={src_type}"
-        if isinstance(dst_ep, dict):
-            logline += f", dstType={dst_type}"
-        logline += ")"
+        logline += f", srcType={src_type}, dstType={dst_type})"
         self._log(logline)
 
         # Insert a run record at start
@@ -1156,11 +927,12 @@ class Replicator(QMainWindow):
         run_id = None
         bidi_stats = None
         try:
-            cur = self._db.execute(
-                "INSERT INTO runs (jobId, startedAt, result) VALUES (?, ?, ?)",
-                (job_id, started_at, "running"),
-            )
-            run_id = cur.lastrowid
+            run_id = None
+            if job_id:
+                try:
+                    run_id = int(self._db.insert("runs", {"jobId": int(job_id), "startedAt": started_at, "result": "running"}))
+                except Exception as e:
+                    self._log(f"[Replicator] Failed to insert run record: {e}", level="warning")
         except Exception as e:
             self._log(f"[Replicator] Failed to insert run record: {e}", level="warning")
 
@@ -1169,7 +941,7 @@ class Replicator(QMainWindow):
         ok = False
         try:
             if str(direction).lower() == "bidirectional":
-                ok, bidi_stats = self._run_job_bidirectional(job, run_id)
+                ok, bidi_stats = self._run_job_bidirectional(job.to_legacy_dict(), run_id)
             else:
                 ok = self._fs.copy(
                     src,
@@ -1205,22 +977,24 @@ class Replicator(QMainWindow):
 
         # Persist lastRun and lastResult, refresh UI, save to DB
         now_str = datetime.now(timezone.utc).isoformat()
-        job["lastRun"] = now_str
-        job["lastResult"] = "ok" if ok else "fail"
-        job["lastError"] = None if ok else (job.get("lastError") or "Failed")
-        self._db_upsert_job(job)
+        job.lastRun = now_str
+        job.lastResult = "ok" if ok else "fail"
+        job.lastError = None if ok else (job.lastError or "Failed")
+        self._store.upsert(job)
         if run_id:
             try:
-                self._db.execute(
-                    "UPDATE runs SET endedAt = ?, result = ?, message = ? WHERE id = ?",
-                    (now_str, "ok" if ok else "fail", None if ok else (job.get("lastError") or "Failed"), run_id),
+                self._db.update(
+                    "runs",
+                    {"endedAt": now_str, "result": ("ok" if ok else "fail"), "message": (None if ok else (job.lastError or "Failed"))},
+                    "id = :id",
+                    {"id": int(run_id)},
                 )
             except Exception as e:
                 self._log(f"[Replicator] Failed to update run record: {e}", level="warning")
         if self._table:
             self._reload_jobs()
 
-        self._log(f"[Replicator] Job '{name}' result: {'OK' if ok else 'FAIL'} (lastResult={job['lastResult']})", level="info" if ok else "warning")
+        self._log(f"[Replicator] Job '{job.name}' result: {'OK' if ok else 'FAIL'} (lastResult={job.lastResult})", level="info" if ok else "warning")
         return ok
 
     def _log(self, msg: str, level: str = "info", channel: str = "replicator") -> None:
@@ -1235,21 +1009,17 @@ class Replicator(QMainWindow):
         If verbose=True, also logs the most recent rows for key tables.
         """
         try:
-            conn = self._db.connect()
-
             # List tables
-            tables = [r["name"] for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
-            ).fetchall()]
+            tables = [r["name"] for r in self._db.query("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")]
 
             self._log(f"[Replicator][DB] Tables: {', '.join(tables) if tables else '(none)'}", level="debug")
 
             # Layout + counts
             for t in tables:
                 try:
-                    cols = conn.execute(f"PRAGMA table_info({t})").fetchall()
-                    col_names = [c[1] for c in cols]  # (cid, name, type, notnull, dflt_value, pk)
-                    count = conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                    cols = self._db.query(f"PRAGMA table_info({t})")
+                    col_names = [c.get("name") for c in cols]
+                    count = int(self._db.scalar(f"SELECT COUNT(*) FROM {t}") or 0)
                     self._log(f"[Replicator][DB] {t}: columns={len(col_names)} rows={count}", level="debug")
                     if verbose:
                         self._log(f"[Replicator][DB] {t}: {', '.join(col_names)}", level="debug")
@@ -1259,22 +1029,17 @@ class Replicator(QMainWindow):
             if not verbose:
                 return
 
-            # Recent rows (lightweight, avoid dumping secrets)
-            def _safe_row(row: sqlite3.Row) -> Dict[str, Any]:
-                d = dict(row)
-                # redact sensitive fields if present
-                for k in ("password", "sshKey"):
-                    if k in d and d[k]:
-                        d[k] = "***"
-                return d
-
             for t, order_col in (("jobs", "id"), ("runs", "id"), ("schedule", "id"), ("conflicts", "id")):
                 if t in tables:
                     try:
-                        rows = conn.execute(f"SELECT * FROM {t} ORDER BY {order_col} DESC LIMIT 3").fetchall()
+                        rows = self._db.query(f"SELECT * FROM {t} ORDER BY {order_col} DESC LIMIT 3")
                         self._log(f"[Replicator][DB] {t}: latest {len(rows)} row(s)", level="debug")
                         for r in rows:
-                            self._log(f"[Replicator][DB] {t}: {_safe_row(r)}", level="debug")
+                            dr = dict(r)
+                            for k in ("password", "sshKey"):
+                                if k in dr and dr[k]:
+                                    dr[k] = "***"
+                            self._log(f"[Replicator][DB] {t}: {dr}", level="debug")
                     except Exception as e:
                         self._log(f"[Replicator][DB] Failed reading latest rows from {t}: {e}", level="warning")
 
@@ -1282,200 +1047,6 @@ class Replicator(QMainWindow):
             self._log(f"[Replicator][DB] Snapshot failed: {e}", level="warning")
 
 
-# ------------------------------------------------------------------
-# DB-backed job persistence methods
-# ------------------------------------------------------------------
-    def _db_fetch_jobs(self) -> List[Dict[str, Any]]:
-        # Query jobs ordered by id
-        rows = self._db.query_all("SELECT * FROM jobs ORDER BY id ASC")
-        jobs: List[Dict[str, Any]] = []
-        for row in rows:
-            job = dict(row)
-            job["id"] = row["id"]
-            enabled_val = row["enabled"] if "enabled" in row.keys() else 1
-            job["enabled"] = bool(enabled_val)
-            # Endpoints
-            eps = self._db.query_all("SELECT * FROM endpoints WHERE jobId = ?", (row["id"],))
-            for ep in eps:
-                ep_d = dict(ep)
-                auth = {}
-                # Compose auth dict
-                if ep_d["type"] == "local":
-                    auth = {}
-                elif ep_d["type"] in ("smb", "ftp"):
-                    auth = {
-                        "guest": bool(ep_d.get("guest", 1)),
-                        "username": ep_d.get("username") or "",
-                        "password": ep_d.get("password") or "",
-                    }
-                    if ep_d["type"] == "ftp":
-                        auth["port"] = ep_d.get("port") or 21
-                elif ep_d["type"] == "ssh":
-                    auth = {
-                        "useKey": bool(ep_d.get("useKey", 0)),
-                        "username": ep_d.get("username") or "",
-                        "password": ep_d.get("password") or "",
-                        "port": ep_d.get("port") or 22,
-                        "key": ep_d.get("sshKey") or "",
-                    }
-                # Add any JSON options
-                if ep_d.get("options"):
-                    try:
-                        auth.update(json.loads(ep_d["options"]))
-                    except Exception:
-                        pass
-                ep_obj = {
-                    "type": ep_d["type"],
-                    "location": ep_d["location"],
-                    "auth": auth,
-                }
-                if ep_d["role"] == "source":
-                    job["sourceEndpoint"] = ep_obj
-                    job["source"] = ep_d["location"]
-                elif ep_d["role"] == "target":
-                    job["targetEndpoint"] = ep_obj
-                    job["target"] = ep_d["location"]
-            # Schedule
-            sched_row = self._db.query_one("SELECT * FROM schedule WHERE jobId = ?", (row["id"],))
-            if sched_row:
-                job["schedule"] = {
-                    "enabled": bool(sched_row["enabled"]),
-                    "everyMinutes": sched_row["everyMinutes"],
-                }
-            else:
-                job["schedule"] = {"enabled": False, "everyMinutes": 60}
-            # lastRun/lastResult/lastError
-            job["lastRun"] = row["lastRun"]
-            job["lastResult"] = row["lastResult"]
-            job["lastError"] = row["lastError"]
-            jobs.append(job)
-        return jobs
-
-    def _db_upsert_job(self, job: Dict[str, Any]) -> int:
-
-        # Normalize enabled
-        enabled = 1 if bool(job.get("enabled", True)) else 0
-
-        # Insert or update jobs row, endpoints, schedule (transaction)
-        conn = self._db.connect()
-        with conn:
-            # Upsert job
-            fields = [
-                "name", "enabled", "mode", "direction", "allowDeletion", "preserveMetadata",
-                "pairId", "conflictPolicy", "lastRun", "lastResult", "lastError"
-            ]
-            values = [
-                job.get("name"),
-                enabled,
-                job.get("mode", "mirror"),
-                job.get("direction", "unidirectional"),
-                1 if job.get("allowDeletion", False) else 0,
-                1 if job.get("preserveMetadata", True) else 0,
-                job.get("pairId"),
-                job.get("conflictPolicy", "newest"),
-                job.get("lastRun"),
-                job.get("lastResult"),
-                job.get("lastError"),
-            ]
-            if job.get("id"):
-                # UPDATE
-                set_clause = ", ".join(f"{f}=?" for f in fields)
-                conn.execute(
-                    f"UPDATE jobs SET {set_clause} WHERE id = ?",
-                    tuple(values) + (job["id"],)
-                )
-                job_id = job["id"]
-            else:
-                # INSERT
-                placeholders = ", ".join("?" for _ in fields)
-                cur = conn.execute(
-                    f"INSERT INTO jobs ({', '.join(fields)}) VALUES ({placeholders})",
-                    tuple(values)
-                )
-                job_id = cur.lastrowid
-                job["id"] = job_id
-
-            # Endpoints (upsert by (jobId, role))
-            for role in ("source", "target"):
-                ep = job.get("sourceEndpoint") if role == "source" else job.get("targetEndpoint")
-                if not isinstance(ep, dict):
-                    continue
-                ep_type = ep.get("type", "local")
-                location = ep.get("location", "")
-                auth = ep.get("auth", {}) or {}
-                # Compose columns
-                port = None
-                guest = 1
-                username = None
-                password = None
-                useKey = 0
-                sshKey = None
-                options = {}
-                if ep_type == "local":
-                    pass
-                elif ep_type in ("smb", "ftp"):
-                    guest = 1 if auth.get("guest", True) else 0
-                    username = auth.get("username")
-                    password = auth.get("password")
-                    if ep_type == "ftp":
-                        port = int(auth.get("port", 21))
-                elif ep_type == "ssh":
-                    useKey = 1 if auth.get("useKey", False) else 0
-                    username = auth.get("username")
-                    password = auth.get("password")
-                    port = int(auth.get("port", 22))
-                    sshKey = auth.get("key")
-                # Store any extra keys in options
-                known_keys = {"guest", "username", "password", "port", "useKey", "key"}
-                for k, v in auth.items():
-                    if k not in known_keys:
-                        options[k] = v
-                # Upsert: try update first, else insert
-                ep_row = conn.execute(
-                    "SELECT id FROM endpoints WHERE jobId = ? AND role = ?",
-                    (job_id, role)
-                ).fetchone()
-                ep_fields = [
-                    "jobId", "role", "type", "location", "port", "guest", "username", "password", "useKey", "sshKey", "options"
-                ]
-                ep_values = [
-                    job_id, role, ep_type, location, port, guest, username, password, useKey, sshKey,
-                    json.dumps(options) if options else None
-                ]
-                if ep_row:
-                    set_clause = ", ".join(f"{f}=?" for f in ep_fields[2:])  # skip jobId, role
-                    conn.execute(
-                        f"UPDATE endpoints SET {set_clause} WHERE jobId=? AND role=?",
-                        tuple(ep_values[2:]) + (job_id, role)
-                    )
-                else:
-                    placeholders = ", ".join("?" for _ in ep_fields)
-                    conn.execute(
-                        f"INSERT INTO endpoints ({', '.join(ep_fields)}) VALUES ({placeholders})",
-                        tuple(ep_values)
-                    )
-            # Schedule
-            sched = job.get("schedule")
-            if sched:
-                sched_row = conn.execute(
-                    "SELECT id FROM schedule WHERE jobId = ?", (job_id,)
-                ).fetchone()
-                enabled = 1 if sched.get("enabled", False) else 0
-                every = int(sched.get("everyMinutes", 60))
-                if sched_row:
-                    conn.execute(
-                        "UPDATE schedule SET enabled=?, everyMinutes=? WHERE jobId=?",
-                        (enabled, every, job_id)
-                    )
-                else:
-                    conn.execute(
-                        "INSERT INTO schedule (jobId, enabled, everyMinutes) VALUES (?, ?, ?)",
-                        (job_id, enabled, every)
-                    )
-        return job.get("id")
-
-    def _db_delete_job(self, job_id: int) -> None:
-        self._db.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
 
 
     def _db_maintenance(self) -> None:
@@ -1500,17 +1071,16 @@ class Replicator(QMainWindow):
             prune_conflict_days, prune_deleted_state_days = 90, 30
             do_vacuum = False
 
-        conn = self._db.connect()
         now = datetime.now(timezone.utc)
         now_iso = now.isoformat()
 
         # Runs: keep last N per job + prune anything older than keep_days
         try:
-            job_ids = [r[0] for r in conn.execute("SELECT id FROM jobs").fetchall()]
-            with conn:
+            job_ids = [int(r.get("id")) for r in (self._db.query("SELECT id FROM jobs") or [])]
+            with self._db.transaction():
                 for jid in job_ids:
                     if keep_last > 0:
-                        conn.execute(
+                        self._db.execute(
                             """
                             DELETE FROM runs
                             WHERE jobId = ?
@@ -1522,7 +1092,7 @@ class Replicator(QMainWindow):
                         )
 
                 if keep_days > 0:
-                    conn.execute(
+                    self._db.execute(
                         "DELETE FROM runs WHERE julianday(created) < julianday('now', ?) ",
                         (f'-{keep_days} days',),
                     )
@@ -1532,8 +1102,8 @@ class Replicator(QMainWindow):
         # Conflicts: keep all open; prune non-open older than prune_conflict_days
         try:
             if prune_conflict_days > 0:
-                with conn:
-                    conn.execute(
+                with self._db.transaction():
+                    self._db.execute(
                         "DELETE FROM conflicts WHERE status <> 'open' AND julianday(created) < julianday('now', ?) ",
                         (f'-{prune_conflict_days} days',),
                     )
@@ -1543,8 +1113,8 @@ class Replicator(QMainWindow):
         # file_state: prune deleted entries that have been deleted for a long time
         try:
             if prune_deleted_state_days > 0:
-                with conn:
-                    conn.execute(
+                with self._db.transaction():
+                    self._db.execute(
                         "DELETE FROM file_state WHERE deleted = 1 AND deletedAt IS NOT NULL AND julianday(deletedAt) < julianday('now', ?) ",
                         (f'-{prune_deleted_state_days} days',),
                     )
@@ -1553,10 +1123,10 @@ class Replicator(QMainWindow):
 
         # SQLite maintenance: optimize; optionally vacuum
         try:
-            conn.execute("PRAGMA optimize;")
+            self._db.execute("PRAGMA optimize;")
             if do_vacuum:
-                conn.execute("VACUUM;")
-            self._db.set_meta("maintenance.lastRunAt", now_iso)
+                self._db.execute("VACUUM;")
+            self._migration.set_meta("maintenance.lastRunAt", now_iso)
             self._log("[Replicator][DB] Maintenance completed.", level="debug")
         except Exception as e:
             self._log(f"[Replicator][DB] Maintenance failed: {e}", level="warning")

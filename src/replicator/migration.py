@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 # src/replicator/migration.py
 
@@ -48,8 +47,6 @@ class Migration:
 
     def set_meta(self, key: str, value: Optional[str]) -> None:
         """Upsert a value into the `meta` table."""
-        # meta table is created by migration 0003, but this is called later
-        # (maintenance). If a user runs an older DB, this will no-op safely.
         try:
             with self._db.transaction():
                 exists = self._db.scalar("SELECT 1 FROM meta WHERE key = ? LIMIT 1", (key,))
@@ -255,6 +252,14 @@ class Migration:
                         value TEXT NULL
                     );
                     """,
+                ],
+            ),
+            (
+                "0004_schedule_windows",
+                [
+                    # Store schedule windows as JSON (dict weekday -> list[{start,end},...])
+                    # This is the minimal schema required to support your UI scheduling window editor.
+                    "ALTER TABLE schedule ADD COLUMN windows TEXT NULL;",
                 ],
             ),
         ]

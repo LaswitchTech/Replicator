@@ -3,6 +3,7 @@
 
 from .replicator import Replicator
 from .ui import JobDialog, ScheduleDialog
+from .job import Job, Schedule, Endpoint
 
 __version__ = "1.0.0"
 

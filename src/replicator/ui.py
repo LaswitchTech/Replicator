@@ -3,9 +3,9 @@
 
 from __future__ import annotations
 
-from typing import Optional, Any, Dict
+from typing import Optional, Any, Dict, List, Tuple
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTime
 from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -22,6 +22,7 @@ from PyQt5.QtWidgets import (
     QFrame,
     QSizePolicy,
     QLayout,
+    QTimeEdit,
 )
 
 try:
@@ -50,7 +51,7 @@ class JobDialog(QDialog):
         layout.setSizeConstraint(QLayout.SetMinimumSize)
 
         # ------------------------------
-        # Name row (full width)
+        # Name row
         # ------------------------------
         name_row = QHBoxLayout()
         name_row.addWidget(QLabel("Name"))
@@ -63,24 +64,18 @@ class JobDialog(QDialog):
             ep = job.get(key_endpoint)
             if isinstance(ep, dict):
                 return dict(ep)
-            return {
-                "type": default_type,
-                "location": job.get(key_str, ""),
-                "auth": {},
-            }
+            return {"type": default_type, "location": job.get(key_str, ""), "auth": {}}
 
         self._source_ep = _get_endpoint("sourceEndpoint", "source", "local")
         self._target_ep = _get_endpoint("targetEndpoint", "target", "local")
 
         # ------------------------------
-        # Two-column area: Source / Destination
+        # Two-column Source / Destination
         # ------------------------------
         cols = QHBoxLayout()
         cols.setSpacing(20)
-        # Keep endpoint panels compact (avoid vertical stretching)
         cols.setAlignment(Qt.AlignTop)
 
-        # Bordered containers for better visual separation
         src_frame = QFrame()
         src_frame.setObjectName("EndpointFrame")
         src_frame.setFrameShape(QFrame.NoFrame)
@@ -133,7 +128,6 @@ class JobDialog(QDialog):
             self._target_auth_widgets,
         ) = self._build_endpoint(existing=self._target_ep)
 
-        # Endpoint row: Type + Location (+ Port for FTP/SSH)
         src_col.addWidget(self._source_endpoint_row)
         src_col.addWidget(self._source_auth_widget)
 
@@ -161,7 +155,6 @@ class JobDialog(QDialog):
         if idx >= 0:
             self.direction.setCurrentIndex(idx)
 
-        # Mode + Direction on same line, each taking half width
         mode_dir_row = QHBoxLayout()
 
         mode_wrap = QWidget()
@@ -180,15 +173,12 @@ class JobDialog(QDialog):
         dir_lay.addWidget(QLabel("Direction"))
         dir_lay.addWidget(self.direction, 1)
 
-        self.mode.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.direction.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-
         mode_dir_row.addWidget(mode_wrap, 1)
         mode_dir_row.addWidget(dir_wrap, 1)
         layout.addLayout(mode_dir_row)
 
         # ------------------------------
-        # Other options (kept simple)
+        # Other options
         # ------------------------------
         opts_row = QHBoxLayout()
         self.allow_deletion = QCheckBox("Allow deletion")
@@ -202,6 +192,12 @@ class JobDialog(QDialog):
         opts_row.addWidget(self.preserve_metadata)
         opts_row.addWidget(self.enabled)
         opts_row.addStretch(1)
+
+        # Schedule button (UI stays here)
+        self._schedule_btn = QPushButton("Schedule…")
+        self._schedule_btn.clicked.connect(self._open_schedule)
+        opts_row.addWidget(self._schedule_btn)
+
         layout.addLayout(opts_row)
 
         # ------------------------------
@@ -251,24 +247,26 @@ class JobDialog(QDialog):
             initial=True,
         )
 
+    def _open_schedule(self) -> None:
+        job = self._original_job if isinstance(self._original_job, dict) else {}
+        dlg = ScheduleDialog(self, job=job)
+        if dlg.exec_() == QDialog.Accepted:
+            # store schedule back into original job dict so value() preserves it
+            if not isinstance(self._original_job, dict):
+                self._original_job = {}
+            self._original_job["schedule"] = dlg.value()
+
     # ------------------------------------------------------------------
     # Endpoint UI
     # ------------------------------------------------------------------
 
     def _build_endpoint(self, existing: Dict[str, Any]):
-        """Build endpoint widgets.
-
-        Returns:
-            (type_combo, location_edit, port_spin, endpoint_row_widget, auth_widget, widgets_dict)
-        """
-        # Top row: [Type] [Location] [Port (FTP/SSH)]
         type_combo = QComboBox()
         type_combo.addItems(["local", "smb", "ftp", "ssh"])
         idx = type_combo.findText(existing.get("type", "local"))
         if idx >= 0:
             type_combo.setCurrentIndex(idx)
         type_combo.setFixedWidth(110)
-        # Allow _on_type_changed to access original config
         type_combo.setProperty("existing_type", existing.get("type", "local"))
         type_combo.setProperty("existing_auth", existing.get("auth", {}) or {})
 
@@ -277,7 +275,7 @@ class JobDialog(QDialog):
         port_spin = QSpinBox()
         port_spin.setRange(1, 65535)
         port_spin.setFixedWidth(110)
-        # Default ports (used when the type is FTP/SSH)
+
         existing_type = existing.get("type", "local")
         existing_auth = existing.get("auth", {}) or {}
         if existing_type == "ftp":
@@ -285,10 +283,8 @@ class JobDialog(QDialog):
         elif existing_type == "ssh":
             port_spin.setValue(int(existing_auth.get("port", 22) or 22))
         else:
-            # Keep a sane default value even when hidden
             port_spin.setValue(21)
 
-        # Endpoint row widget with label: [Label] [Type] [Location] [Port]
         endpoint_fields = QWidget()
         fields_lay = QHBoxLayout(endpoint_fields)
         fields_lay.setContentsMargins(0, 0, 0, 0)
@@ -304,8 +300,6 @@ class JobDialog(QDialog):
         endpoint_form.setSpacing(6)
         endpoint_form.addRow(endpoint_fields)
 
-        # Auth widget (shown only when non-local)
-        # Use a dedicated sub-container that shrinks/grows with its visible children.
         auth_widget = QFrame()
         auth_widget.setFrameShape(QFrame.NoFrame)
         auth_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
@@ -334,7 +328,7 @@ class JobDialog(QDialog):
         smb_password.setEchoMode(QLineEdit.Password)
 
         smb_auth = existing.get("auth", {}) if existing.get("type") == "smb" else {}
-        smb_guest.setChecked(bool(smb_auth.get("guest", True)))  # default guest ON
+        smb_guest.setChecked(bool(smb_auth.get("guest", True)))
         smb_username.setText(smb_auth.get("username", ""))
         smb_password.setText(smb_auth.get("password", ""))
 
@@ -365,7 +359,7 @@ class JobDialog(QDialog):
         ftp_password.setEchoMode(QLineEdit.Password)
 
         ftp_auth = existing.get("auth", {}) if existing.get("type") == "ftp" else {}
-        ftp_guest.setChecked(bool(ftp_auth.get("guest", True)))  # default guest ON
+        ftp_guest.setChecked(bool(ftp_auth.get("guest", True)))
         ftp_username.setText(ftp_auth.get("username", ""))
         ftp_password.setText(ftp_auth.get("password", ""))
 
@@ -403,7 +397,6 @@ class JobDialog(QDialog):
         ssh_username.setText(ssh_auth.get("username", ""))
         ssh_password.setText(ssh_auth.get("password", ""))
         ssh_key_text.setPlainText(ssh_auth.get("key", ""))
-        # Default: use key if no password provided
         ssh_use_key.setChecked(bool(ssh_auth.get("useKey", True if not ssh_password.text().strip() else False)))
 
         ssh_form.addRow(ssh_use_key)
@@ -413,10 +406,8 @@ class JobDialog(QDialog):
 
         def _ssh_use_key_update():
             use_key = ssh_use_key.isChecked()
-            # Username always visible
             ssh_user_lbl.setVisible(True)
             ssh_username.setVisible(True)
-            # Toggle password vs key
             ssh_pass_lbl.setVisible(not use_key)
             ssh_password.setVisible(not use_key)
             ssh_key_lbl.setVisible(use_key)
@@ -425,39 +416,14 @@ class JobDialog(QDialog):
         ssh_use_key.stateChanged.connect(_ssh_use_key_update)
         _ssh_use_key_update()
 
-        # Stacked display controlled by _on_type_changed
-        # We keep all wraps created and toggle visibility.
         auth_lay.addWidget(auth_title)
         auth_lay.addWidget(smb_wrap)
         auth_lay.addWidget(ftp_wrap)
         auth_lay.addWidget(ssh_wrap)
 
-        widgets["smb"] = {
-            "wrap": smb_wrap,
-            "guest": smb_guest,
-            "user_lbl": smb_user_lbl,
-            "username": smb_username,
-            "pass_lbl": smb_pass_lbl,
-            "password": smb_password,
-        }
-        widgets["ftp"] = {
-            "wrap": ftp_wrap,
-            "guest": ftp_guest,
-            "user_lbl": ftp_user_lbl,
-            "username": ftp_username,
-            "pass_lbl": ftp_pass_lbl,
-            "password": ftp_password,
-        }
-        widgets["ssh"] = {
-            "wrap": ssh_wrap,
-            "useKey": ssh_use_key,
-            "user_lbl": ssh_user_lbl,
-            "username": ssh_username,
-            "pass_lbl": ssh_pass_lbl,
-            "password": ssh_password,
-            "key_lbl": ssh_key_lbl,
-            "key": ssh_key_text,
-        }
+        widgets["smb"] = {"wrap": smb_wrap, "guest": smb_guest, "user_lbl": smb_user_lbl, "username": smb_username, "pass_lbl": smb_pass_lbl, "password": smb_password}
+        widgets["ftp"] = {"wrap": ftp_wrap, "guest": ftp_guest, "user_lbl": ftp_user_lbl, "username": ftp_username, "pass_lbl": ftp_pass_lbl, "password": ftp_password}
+        widgets["ssh"] = {"wrap": ssh_wrap, "useKey": ssh_use_key, "user_lbl": ssh_user_lbl, "username": ssh_username, "pass_lbl": ssh_pass_lbl, "password": ssh_password, "key_lbl": ssh_key_lbl, "key": ssh_key_text}
 
         return type_combo, location_edit, port_spin, endpoint_row, auth_widget, widgets
 
@@ -472,7 +438,6 @@ class JobDialog(QDialog):
     ):
         typ = type_combo.currentText()
 
-        # Placeholders
         placeholder = {
             "local": "Local path (e.g. /data or C:\\Data)",
             "smb": "SMB path (e.g. \\\\SERVER\\Share\\Folder)",
@@ -481,21 +446,18 @@ class JobDialog(QDialog):
         }.get(typ, "")
         location_edit.setPlaceholderText(placeholder)
 
-        # Port visibility + defaults
         if typ in ("ftp", "ssh"):
             port_spin.setVisible(True)
 
             existing_type = type_combo.property("existing_type") or "local"
             existing_auth = type_combo.property("existing_auth") or {}
 
-            # If initial load and the saved endpoint type matches, prefer saved port
             if initial and existing_type == typ:
                 if typ == "ftp":
                     port_spin.setValue(int(existing_auth.get("port", 21) or 21))
-                else:  # ssh
+                else:
                     port_spin.setValue(int(existing_auth.get("port", 22) or 22))
             else:
-                # When switching types, fix common wrong/default values
                 cur = int(port_spin.value())
                 if typ == "ftp" and cur in (0, 22):
                     port_spin.setValue(21)
@@ -504,7 +466,6 @@ class JobDialog(QDialog):
         else:
             port_spin.setVisible(False)
 
-        # Auth visibility: collapse container when hidden, resize to content when shown
         if typ == "local":
             auth_widget.setVisible(False)
             auth_widget.setMaximumHeight(0)
@@ -512,7 +473,6 @@ class JobDialog(QDialog):
             auth_widget.setVisible(True)
             auth_widget.setMaximumHeight(16777215)
 
-        # Toggle which auth panel is visible
         for key in ("smb", "ftp", "ssh"):
             if key in widgets and "wrap" in widgets[key]:
                 widgets[key]["wrap"].setVisible(False)
@@ -520,15 +480,12 @@ class JobDialog(QDialog):
         if typ in ("smb", "ftp", "ssh"):
             widgets[typ]["wrap"].setVisible(True)
 
-        # Defaults: guest ON for non-local SMB/FTP when not configured
         if typ in ("smb", "ftp"):
             w = widgets[typ]
             if w["guest"].isChecked() is False:
-                # Only auto-enable guest if user/pass are empty
                 if not w["username"].text().strip() and not w["password"].text().strip():
                     w["guest"].setChecked(True)
 
-        # Force re-layout so the auth container shrinks/grows immediately
         auth_widget.adjustSize()
         if auth_widget.parentWidget() is not None:
             auth_widget.parentWidget().adjustSize()
@@ -556,7 +513,6 @@ class JobDialog(QDialog):
             MsgBox.show(self, "Job", "Target location is required.", icon="warning")
             return
 
-        # Source auth validation
         if src_type in ("smb", "ftp"):
             w = self._source_auth_widgets[src_type]
             if not w["guest"].isChecked():
@@ -578,7 +534,6 @@ class JobDialog(QDialog):
                     MsgBox.show(self, "Job", "Source SSH password is required when not using a key.", icon="warning")
                     return
 
-        # Target auth validation
         if tgt_type in ("smb", "ftp"):
             w = self._target_auth_widgets[tgt_type]
             if not w["guest"].isChecked():
@@ -607,12 +562,7 @@ class JobDialog(QDialog):
     # ------------------------------------------------------------------
 
     def value(self) -> Dict[str, Any]:
-        def _extract(
-            type_combo: QComboBox,
-            location_edit: QLineEdit,
-            port_spin: QSpinBox,
-            widgets: Dict[str, Any],
-        ) -> Dict[str, Any]:
+        def _extract(type_combo: QComboBox, location_edit: QLineEdit, port_spin: QSpinBox, widgets: Dict[str, Any]) -> Dict[str, Any]:
             typ = type_combo.currentText()
             location = location_edit.text().strip()
             auth: Dict[str, Any] = {}
@@ -621,55 +571,25 @@ class JobDialog(QDialog):
                 auth = {}
             elif typ == "smb":
                 w = widgets["smb"]
-                auth = {
-                    "guest": bool(w["guest"].isChecked()),
-                    "username": w["username"].text().strip(),
-                    "password": w["password"].text(),
-                }
+                auth = {"guest": bool(w["guest"].isChecked()), "username": w["username"].text().strip(), "password": w["password"].text()}
             elif typ == "ftp":
                 w = widgets["ftp"]
-                auth = {
-                    "guest": bool(w["guest"].isChecked()),
-                    "username": w["username"].text().strip(),
-                    "password": w["password"].text(),
-                    "port": int(port_spin.value()),
-                }
+                auth = {"guest": bool(w["guest"].isChecked()), "username": w["username"].text().strip(), "password": w["password"].text(), "port": int(port_spin.value())}
             elif typ == "ssh":
                 w = widgets["ssh"]
-                auth = {
-                    "useKey": bool(w["useKey"].isChecked()),
-                    "username": w["username"].text().strip(),
-                    "password": w["password"].text(),
-                    "port": int(port_spin.value()),
-                    "key": w["key"].toPlainText(),
-                }
+                auth = {"useKey": bool(w["useKey"].isChecked()), "username": w["username"].text().strip(), "password": w["password"].text(), "port": int(port_spin.value()), "key": w["key"].toPlainText()}
 
-            return {
-                "type": typ,
-                "location": location,
-                "auth": auth,
-            }
+            return {"type": typ, "location": location, "auth": auth}
 
-        source_ep = _extract(
-            self._source_type_combo,
-            self._source_location_edit,
-            self._source_port_spin,
-            self._source_auth_widgets,
-        )
-        target_ep = _extract(
-            self._target_type_combo,
-            self._target_location_edit,
-            self._target_port_spin,
-            self._target_auth_widgets,
-        )
+        source_ep = _extract(self._source_type_combo, self._source_location_edit, self._source_port_spin, self._source_auth_widgets)
+        target_ep = _extract(self._target_type_combo, self._target_location_edit, self._target_port_spin, self._target_auth_widgets)
 
         val: Dict[str, Any] = {
             "name": self.name.text().strip(),
             "sourceEndpoint": source_ep,
             "targetEndpoint": target_ep,
-            # Backward compatibility
-            "source": source_ep["location"],
-            "target": target_ep["location"],
+            "source": source_ep["location"],  # backward compatibility
+            "target": target_ep["location"],  # backward compatibility
             "allowDeletion": bool(self.allow_deletion.isChecked()),
             "preserveMetadata": bool(self.preserve_metadata.isChecked()),
             "mode": self.mode.currentText(),
@@ -677,7 +597,7 @@ class JobDialog(QDialog):
             "enabled": bool(self.enabled.isChecked()),
         }
 
-        # Preserve schedule fields if they existed previously
+        # Preserve schedule (and update if ScheduleDialog was used)
         if self._original_job and isinstance(self._original_job, dict):
             sched = self._original_job.get("schedule")
             if sched is not None:
@@ -685,26 +605,51 @@ class JobDialog(QDialog):
 
         return val
 
+
 # ------------------------------------------------------------------
 # Schedule Dialog
 # ------------------------------------------------------------------
 class ScheduleDialog(QDialog):
+    """Schedule editor UI.
+
+    Persists as:
+      schedule = {
+        "enabled": bool,
+        "everyMinutes": int,
+        "windows": { "0":[{"start":"22:00","end":"06:00"}], ... }
+      }
+    """
+
+    _DAYS: List[Tuple[int, str]] = [
+        (0, "Monday"),
+        (1, "Tuesday"),
+        (2, "Wednesday"),
+        (3, "Thursday"),
+        (4, "Friday"),
+        (5, "Saturday"),
+        (6, "Sunday"),
+    ]
+
     def __init__(self, parent=None, job: Optional[Dict[str, Any]] = None):
         super().__init__(parent)
         self.setWindowTitle("Schedule")
         self.setModal(True)
 
         job = job or {}
-        schedule = job.get("schedule", {})
+        schedule = job.get("schedule", {}) if isinstance(job.get("schedule", {}), dict) else {}
+
+        self._windows: Dict[str, Any] = schedule.get("windows", {}) if isinstance(schedule.get("windows", {}), dict) else {}
 
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignTop)
         layout.setSizeConstraint(QLayout.SetMinimumSize)
+
         form = QFormLayout()
         layout.addLayout(form)
 
         self.enabled = QCheckBox()
         self.enabled.setChecked(bool(schedule.get("enabled", False)))
+
         self.every_minutes = QSpinBox()
         self.every_minutes.setRange(1, 10080)
         self.every_minutes.setValue(int(schedule.get("everyMinutes", 60)))
@@ -712,26 +657,128 @@ class ScheduleDialog(QDialog):
         form.addRow("Enabled", self.enabled)
         form.addRow("Every minutes", self.every_minutes)
 
+        # Windows editor
+        win_frame = QFrame()
+        win_frame.setFrameShape(QFrame.NoFrame)
+        win_lay = QVBoxLayout(win_frame)
+        win_lay.setContentsMargins(0, 0, 0, 0)
+        win_lay.setSpacing(6)
+
+        title = QLabel("Allowed run windows")
+        title.setStyleSheet("font-weight: 600;")
+        win_lay.addWidget(title)
+
+        self._day_controls: Dict[int, Dict[str, Any]] = {}
+
+        for wd, label in self._DAYS:
+            row = QHBoxLayout()
+            row.setSpacing(10)
+
+            day_enabled = QCheckBox(label)
+            start = QTimeEdit()
+            end = QTimeEdit()
+            start.setDisplayFormat("HH:mm")
+            end.setDisplayFormat("HH:mm")
+            start.setTime(QTime(0, 0))
+            end.setTime(QTime(23, 59))
+
+            # Load from existing windows if present
+            key = str(wd)
+            day_windows = self._windows.get(key)
+            if isinstance(day_windows, list) and len(day_windows) > 0 and isinstance(day_windows[0], dict):
+                w0 = day_windows[0]
+                s = str(w0.get("start", "00:00"))
+                e = str(w0.get("end", "23:59"))
+                day_enabled.setChecked(True)
+                start.setTime(self._parse_qtime(s, QTime(0, 0)))
+                end.setTime(self._parse_qtime(e, QTime(23, 59)))
+            else:
+                day_enabled.setChecked(False)
+
+            # Disable edits when not enabled
+            def _apply_enabled_state(_=None, *, _day_enabled=day_enabled, _start=start, _end=end):
+                en = _day_enabled.isChecked()
+                _start.setEnabled(en)
+                _end.setEnabled(en)
+
+            day_enabled.stateChanged.connect(_apply_enabled_state)
+            _apply_enabled_state()
+
+            row.addWidget(day_enabled, 1)
+            row.addWidget(QLabel("Start"))
+            row.addWidget(start)
+            row.addWidget(QLabel("End"))
+            row.addWidget(end)
+
+            win_lay.addLayout(row)
+
+            self._day_controls[wd] = {"enabled": day_enabled, "start": start, "end": end}
+
+        layout.addWidget(win_frame)
+
         btn_row = QHBoxLayout()
         btn_row.addStretch(1)
-
         cancel_btn = QPushButton("Cancel")
         ok_btn = QPushButton("Save")
         cancel_btn.clicked.connect(self.reject)
         ok_btn.clicked.connect(self._on_ok)
-
         btn_row.addWidget(cancel_btn)
         btn_row.addWidget(ok_btn)
         layout.addLayout(btn_row)
+
+        self._sync_enabled_state()
+
+        self.enabled.stateChanged.connect(lambda _i: self._sync_enabled_state())
+
+    def _sync_enabled_state(self):
+        en = self.enabled.isChecked()
+        self.every_minutes.setEnabled(en)
+        for wd, ctrls in self._day_controls.items():
+            ctrls["enabled"].setEnabled(en)
+            # if schedule disabled, visually disable time edits too
+            if not en:
+                ctrls["start"].setEnabled(False)
+                ctrls["end"].setEnabled(False)
+            else:
+                # restore per-day checkbox logic
+                day_en = ctrls["enabled"].isChecked()
+                ctrls["start"].setEnabled(day_en)
+                ctrls["end"].setEnabled(day_en)
+
+    def _parse_qtime(self, s: str, default: QTime) -> QTime:
+        try:
+            parts = s.strip().split(":")
+            if len(parts) != 2:
+                return default
+            hh = int(parts[0])
+            mm = int(parts[1])
+            if hh < 0 or hh > 23 or mm < 0 or mm > 59:
+                return default
+            return QTime(hh, mm)
+        except Exception:
+            return default
 
     def _on_ok(self):
         if self.enabled.isChecked() and self.every_minutes.value() < 1:
             MsgBox.show(self, "Schedule", "Every minutes must be at least 1 if enabled.", icon="warning")
             return
+
+        # Basic validation: ensure enabled days have valid times (QTimeEdit ensures format)
+        # Allow overnight windows naturally (start > end) — that's intended.
         self.accept()
 
     def value(self) -> Dict[str, Any]:
+        windows: Dict[str, Any] = {}
+        if self.enabled.isChecked():
+            for wd, ctrls in self._day_controls.items():
+                if not ctrls["enabled"].isChecked():
+                    continue
+                s = ctrls["start"].time().toString("HH:mm")
+                e = ctrls["end"].time().toString("HH:mm")
+                windows[str(wd)] = [{"start": s, "end": e}]
+
         return {
             "enabled": bool(self.enabled.isChecked()),
             "everyMinutes": int(self.every_minutes.value()),
+            "windows": windows,
         }

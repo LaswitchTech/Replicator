@@ -5,9 +5,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone, time
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 import json
 import sqlite3
+
 try:
     # corePY SQLite wrapper (preferred)
     from core.database.sqlite import SQLite  # type: ignore
@@ -24,14 +25,6 @@ JsonDict = Dict[str, Any]
 
 @dataclass(frozen=True)
 class Endpoint:
-    """
-    UI-agnostic endpoint description.
-
-    Compatible with current DB schema in replicator.py:
-      - endpoints table: role, type, location, port, guest, username, password, useKey, sshKey, options
-      - Job stores endpoints as:
-          {"type": "...", "location": "...", "auth": {...}}
-    """
     type: str = "local"
     location: str = ""
     auth: JsonDict = field(default_factory=dict)
@@ -44,7 +37,6 @@ class Endpoint:
             errs.append(f"{role} endpoint location is required.")
         t = (self.type or "").lower()
 
-        # Basic sanity checks only (no network IO, no UI)
         if t in ("ftp", "ssh"):
             port = self.auth.get("port")
             if port is not None:
@@ -57,12 +49,6 @@ class Endpoint:
         return errs
 
     def to_db_fields(self, role: str) -> JsonDict:
-        """
-        Convert endpoint into endpoints-table fields.
-        Keeps compatibility with your current schema/logic:
-          - known auth keys are stored as columns
-          - extra auth keys are JSON in 'options'
-        """
         t = (self.type or "local").lower()
         auth = dict(self.auth or {})
 
@@ -115,9 +101,6 @@ class Endpoint:
 
     @staticmethod
     def from_db_row(row: Mapping[str, Any]) -> "Endpoint":
-        """
-        Parse endpoints table row into Endpoint.
-        """
         t = (row.get("type") or "local").lower()
         auth: JsonDict = {}
 
@@ -154,29 +137,9 @@ class Endpoint:
 
 @dataclass(frozen=True)
 class Schedule:
-    """
-    Job schedule config.
-
-    Current DB has:
-      - enabled
-      - everyMinutes
-      - nextRunAt
-      - lastScheduledRunAt
-
-    Upcoming feature: day/time windows.
-      - windows: dict weekday -> list of {start:"HH:MM", end:"HH:MM"}
-        weekday: 0=Mon ... 6=Sun (datetime.weekday()).
-
-    Note: windows are not persisted yet by default; but we keep structure ready.
-    """
     enabled: bool = False
     everyMinutes: int = 60
-
-    # Optional advanced scheduling windows:
-    # {0:[{"start":"22:00","end":"06:00"}], 6:[{"start":"00:00","end":"23:59"}], ...}
-    windows: JsonDict = field(default_factory=dict)
-
-    # Optional DB fields (if you want to use them later)
+    windows: JsonDict = field(default_factory=dict)  # persisted as JSON in schedule.windows
     nextRunAt: Optional[str] = None
     lastScheduledRunAt: Optional[str] = None
 
@@ -185,7 +148,6 @@ class Schedule:
         if self.enabled:
             if self.everyMinutes <= 0:
                 errs.append("Schedule everyMinutes must be > 0 when schedule is enabled.")
-        # windows validation is tolerant (future UI can enforce strictness)
         if self.windows and not isinstance(self.windows, dict):
             errs.append("Schedule windows must be a dict of weekday -> list[window].")
         return errs
@@ -204,11 +166,6 @@ class Schedule:
             return None
 
     def _in_window_for_day(self, dt: datetime) -> bool:
-        """
-        Returns True if dt is within any allowed window for dt.weekday().
-        Supports overnight windows like 22:00-06:00.
-        If windows is empty => always allowed.
-        """
         if not self.windows:
             return True
 
@@ -232,7 +189,6 @@ class Schedule:
                 continue
 
             if ts <= te:
-                # same-day window
                 if ts <= tnow <= te:
                     return True
             else:
@@ -249,30 +205,14 @@ class Schedule:
         return self._in_window_for_day(now)
 
     def next_run_at(self, now: Optional[datetime] = None) -> Optional[datetime]:
-        """
-        Returns the next datetime the job is allowed to run based on:
-          - enabled
-          - everyMinutes
-          - windows (if any)
-
-        Strategy:
-          - Start from next minute tick.
-          - Scan forward in 1-minute steps up to 7 days.
-          - Pick first time that is within an allowed window AND aligns to interval.
-
-        This is deterministic and fast enough (<= 10080 iterations).
-        """
         if not self.enabled:
             return None
         if self.everyMinutes <= 0:
-            # Interval 0 is "continuous" in your earlier convo; for scheduling we treat it as "run now"
             return now or datetime.now(timezone.utc)
 
         now = now or datetime.now(timezone.utc)
-        # Normalize to next minute (zero seconds/micros)
         cur = now.replace(second=0, microsecond=0) + timedelta(minutes=1)
 
-        # Align to interval relative to epoch minute 0 (UTC)
         def aligned(dt: datetime) -> bool:
             epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
             minutes = int((dt - epoch).total_seconds() // 60)
@@ -292,28 +232,13 @@ class JobRunResult:
     ok: bool
     started_at: str
     ended_at: str
-    result: str  # "ok"|"fail"|"running"
+    result: str
     message: Optional[str] = None
     stats: JsonDict = field(default_factory=dict)
 
 
 @dataclass
 class Job:
-    """
-    UI-agnostic domain object.
-
-    Owns:
-      - id, name, enabled, mode, direction, allowDeletion, preserveMetadata, conflictPolicy, pairId
-      - sourceEndpoint, targetEndpoint
-      - schedule
-      - lastRun, lastResult, lastError
-
-    Does NOT own:
-      - dialogs/widgets
-      - MsgBox
-      - DB connections/cursors
-    """
-
     id: Optional[int] = None
     name: str = ""
     enabled: bool = True
@@ -333,10 +258,6 @@ class Job:
     lastResult: Optional[str] = None
     lastError: Optional[str] = None
 
-    # ------------------------------------------------------------------
-    # Validation & scheduling
-    # ------------------------------------------------------------------
-
     def validate(self) -> List[str]:
         errs: List[str] = []
         if not self.name.strip():
@@ -350,7 +271,6 @@ class Job:
         errs.extend(self.targetEndpoint.validate("target"))
         errs.extend(self.schedule.validate())
 
-        # Basic constraints
         d = (self.direction or "").lower()
         if d not in ("unidirectional", "bidirectional"):
             errs.append("Job direction must be 'unidirectional' or 'bidirectional'.")
@@ -371,10 +291,6 @@ class Job:
             return None
         return self.schedule.next_run_at(now)
 
-    # ------------------------------------------------------------------
-    # Execution (delegated)
-    # ------------------------------------------------------------------
-
     def run(
         self,
         *,
@@ -383,19 +299,6 @@ class Job:
         bidirectional_func: Optional[Callable[..., Tuple[bool, JsonDict]]] = None,
         logger: Optional[Callable[[str, str], None]] = None,
     ) -> JobRunResult:
-        """
-        Execute job using injected runtime functions.
-
-        - copy_func: should perform unidirectional copy, signature compatible with:
-            copy_func(src, dst, preserve_metadata=bool, allow_deletion=bool) -> bool
-          (matches your FileSystem.copy usage)
-        - bidirectional_func: should perform bidi sync, signature:
-            bidirectional_func(job: Job, run_id: Optional[int]) -> (ok, stats)
-          NOTE: run_id is NOT managed here; JobRunner should pass run_id.
-        - logger: (message, level) callback; level examples: "debug","info","warning","error"
-
-        Returns JobRunResult with ok/fail + stats + timestamps.
-        """
         now_dt = now or datetime.now(timezone.utc)
         started_at = now_dt.isoformat()
 
@@ -406,7 +309,6 @@ class Job:
                 except Exception:
                     pass
 
-        # Validate first (no UI)
         errs = self.validate()
         if errs:
             msg = "; ".join(errs)
@@ -479,19 +381,7 @@ class Job:
             stats=stats or {},
         )
 
-    # ------------------------------------------------------------------
-    # Serialization helpers
-    # ------------------------------------------------------------------
-
     def to_row_dicts(self) -> Dict[str, Any]:
-        """
-        Serialize into DB-ready row dicts:
-          - job_row: fields for jobs table
-          - endpoint_rows: list of fields for endpoints table (excluding jobId)
-          - schedule_row: fields for schedule table (excluding jobId)
-
-        JobStore/Runner can add jobId and persist.
-        """
         job_row = {
             "id": self.id,
             "name": self.name,
@@ -515,11 +405,9 @@ class Job:
         sched_row = {
             "enabled": 1 if self.schedule.enabled else 0,
             "everyMinutes": int(self.schedule.everyMinutes),
-            # nextRunAt / lastScheduledRunAt can be managed by JobRunner
             "nextRunAt": self.schedule.nextRunAt,
             "lastScheduledRunAt": self.schedule.lastScheduledRunAt,
-            # windows not persisted yet by default
-            # "windows": json.dumps(self.schedule.windows) ...
+            "windows": json.dumps(self.schedule.windows or {}) if self.schedule.windows else None,
         }
 
         return {
@@ -534,11 +422,6 @@ class Job:
         endpoint_rows: Iterable[Mapping[str, Any]],
         schedule_row: Optional[Mapping[str, Any]] = None,
     ) -> "Job":
-        """
-        Build Job from DB rows (jobs + endpoints + schedule).
-
-        This matches your current schema and your current in-memory shape.
-        """
         j = Job(
             id=int(job_row.get("id")) if job_row.get("id") is not None else None,
             name=str(job_row.get("name") or ""),
@@ -554,7 +437,6 @@ class Job:
             lastError=job_row.get("lastError"),
         )
 
-        # Endpoints by role
         src = None
         tgt = None
         for r in endpoint_rows:
@@ -568,12 +450,17 @@ class Job:
         j.sourceEndpoint = src or Endpoint()
         j.targetEndpoint = tgt or Endpoint()
 
-        # Schedule
         if schedule_row:
             windows: JsonDict = {}
-            # If you later add a windows column, you can parse it here.
-            # raw_windows = schedule_row.get("windows")
-            # if raw_windows: ...
+            raw_windows = schedule_row.get("windows")
+            if raw_windows:
+                try:
+                    parsed = json.loads(raw_windows)
+                    if isinstance(parsed, dict):
+                        windows = parsed
+                except Exception:
+                    windows = {}
+
             j.schedule = Schedule(
                 enabled=bool(schedule_row.get("enabled", 0)),
                 everyMinutes=int(schedule_row.get("everyMinutes", 60) or 60),
@@ -582,16 +469,11 @@ class Job:
                 lastScheduledRunAt=schedule_row.get("lastScheduledRunAt"),
             )
         else:
-            j.schedule = Schedule(enabled=False, everyMinutes=60)
+            j.schedule = Schedule(enabled=False, everyMinutes=60, windows={})
 
         return j
 
-    # Convenience: current in-memory dict shape compatibility
     def to_legacy_dict(self) -> JsonDict:
-        """
-        Produce the same job dict shape your current Replicator code expects.
-        Useful as an interim bridge while refactoring.
-        """
         return {
             "id": self.id,
             "name": self.name,
@@ -607,7 +489,7 @@ class Job:
             "schedule": {
                 "enabled": self.schedule.enabled,
                 "everyMinutes": self.schedule.everyMinutes,
-                # windows not exposed yet by current UI
+                "windows": self.schedule.windows,
             },
             "lastRun": self.lastRun,
             "lastResult": self.lastResult,
@@ -615,46 +497,20 @@ class Job:
         }
 
 
+# ---------------------------------------------------------------------------
+# JobStore (DB persistence)
+# ---------------------------------------------------------------------------
 
 class JobStore:
-    """SQLite persistence for Job domain objects.
-
-    This class is UI-agnostic and contains no Qt dependencies.
-
-    It targets the schema currently defined in `replicator.py`:
-      - jobs
-      - endpoints
-      - schedule
-
-    Notes:
-      - This store does not write runs/conflicts/file_state.
-      - It upserts endpoints by (jobId, role) and schedule by (jobId).
-    """
+    """SQLite persistence for Job domain objects (UI-agnostic)."""
 
     def __init__(self, db: Any):
-        """Create a JobStore.
-
-        Preferred dependency is `core.database.sqlite.SQLite` (wrapper).
-
-        Accepts either:
-          - a `SQLite` instance (preferred)
-          - a `sqlite3.Connection`
-          - a callable that returns `sqlite3.Connection`
-
-        The fallback connection path exists only for backwards compatibility.
-        """
         self._db = db
 
-    # -------------------------------
-    # Connection helpers
-    # -------------------------------
-
     def _is_core_sqlite(self) -> bool:
-        # Avoid importing Qt here; we only check for the wrapper API.
         return SQLite is not None and isinstance(self._db, SQLite)
 
     def _conn(self) -> sqlite3.Connection:
-        """Fallback: get raw sqlite3.Connection."""
         if isinstance(self._db, sqlite3.Connection):
             return self._db
         if callable(self._db):
@@ -699,7 +555,6 @@ class JobStore:
 
     def _update(self, table: str, data: Dict[str, Any], where: str, params: Any) -> None:
         if self._is_core_sqlite():
-            # wrapper uses named binding for update WHERE params
             if not isinstance(params, dict):
                 raise ValueError("JobStore._update with core SQLite requires dict params")
             self._db.update(table, data, where, params)  # type: ignore[union-attr]
@@ -714,18 +569,20 @@ class JobStore:
         if self._is_core_sqlite():
             self._db.upsert(table, data, conflict_columns, update_columns)  # type: ignore[union-attr]
             return
-        # Fallback path: build an INSERT..ON CONFLICT statement.
+
         keys = list(data.keys())
         cols = ", ".join([f'"{k}"' for k in keys])
         placeholders = ", ".join(["?" for _ in keys])
         conflict = ", ".join([f'"{c}"' for c in conflict_columns])
         if update_columns is None:
             update_columns = [k for k in keys if k not in conflict_columns]
+
         if update_columns:
             set_clause = ", ".join([f'"{k}"=excluded."{k}"' for k in update_columns])
             sql = f'INSERT INTO "{table}" ({cols}) VALUES ({placeholders}) ON CONFLICT({conflict}) DO UPDATE SET {set_clause};'
         else:
             sql = f'INSERT INTO "{table}" ({cols}) VALUES ({placeholders}) ON CONFLICT({conflict}) DO NOTHING;'
+
         conn = self._conn()
         conn.execute(sql, tuple(data[k] for k in keys))
 
@@ -739,7 +596,6 @@ class JobStore:
     def _transaction(self):
         if self._is_core_sqlite():
             return self._db.transaction()  # type: ignore[union-attr]
-        # sqlite3.Connection supports context manager transactions
         return self._conn()
 
     # -------------------------------
@@ -775,8 +631,6 @@ class JobStore:
     # -------------------------------
 
     def upsert(self, job: Job) -> int:
-        """Insert or update a job + its endpoints + schedule. Returns job id."""
-
         row_dicts = job.to_row_dicts()
         job_row: Dict[str, Any] = row_dicts["job_row"]
         endpoint_rows: List[Dict[str, Any]] = row_dicts["endpoint_rows"]
@@ -805,7 +659,7 @@ class JobStore:
                 job_id = self._insert("jobs", data)
                 job.id = job_id
 
-            # --- endpoints ---
+            # --- endpoints (unique: jobId+role) ---
             for ep in endpoint_rows:
                 role = ep.get("role")
                 if role not in ("source", "target"):
@@ -823,23 +677,28 @@ class JobStore:
                     "sshKey": ep.get("sshKey"),
                     "options": ep.get("options"),
                 }
-                # Unique index on (jobId, role)
-                self._upsert("endpoints", ep_data, ["jobId", "role"], update_columns=[
-                    "type", "location", "port", "guest", "username", "password", "useKey", "sshKey", "options"
-                ])
+                self._upsert(
+                    "endpoints",
+                    ep_data,
+                    ["jobId", "role"],
+                    update_columns=["type", "location", "port", "guest", "username", "password", "useKey", "sshKey", "options"],
+                )
 
-            # --- schedule ---
+            # --- schedule (unique: jobId) ---
             s_data = {
                 "jobId": job_id,
                 "enabled": int(schedule_row.get("enabled") or 0),
                 "everyMinutes": int(schedule_row.get("everyMinutes") or 60),
                 "nextRunAt": schedule_row.get("nextRunAt"),
                 "lastScheduledRunAt": schedule_row.get("lastScheduledRunAt"),
+                "windows": schedule_row.get("windows"),
             }
-            # schedule.jobId is UNIQUE
-            self._upsert("schedule", s_data, ["jobId"], update_columns=[
-                "enabled", "everyMinutes", "nextRunAt", "lastScheduledRunAt"
-            ])
+            self._upsert(
+                "schedule",
+                s_data,
+                ["jobId"],
+                update_columns=["enabled", "everyMinutes", "nextRunAt", "lastScheduledRunAt", "windows"],
+            )
 
         return int(job.id or 0)
 
