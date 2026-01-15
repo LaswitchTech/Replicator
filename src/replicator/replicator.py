@@ -845,7 +845,8 @@ class Replicator(QMainWindow):
         return j
 
     def _add_job(self):
-        dlg = JobDialog(self)
+        # Pass configured service.defaultInterval into the dialog so Schedule defaults match user config
+        dlg = JobDialog(self, default_interval_seconds=self._default_interval_seconds())
         if dlg.exec_() == QDialog.Accepted:
             new_job_dict = dlg.value()
             if "schedule" not in new_job_dict or not isinstance(new_job_dict.get("schedule"), dict):
@@ -862,7 +863,8 @@ class Replicator(QMainWindow):
             return
 
         current = self._jobs[idx]
-        dlg = JobDialog(self, current.to_legacy_dict())
+        # Pass configured service.defaultInterval into the dialog so Schedule defaults remain consistent
+        dlg = JobDialog(self, current.to_legacy_dict(), default_interval_seconds=self._default_interval_seconds())
         if dlg.exec_() == QDialog.Accepted:
             updated_dict = dlg.value()
             job_obj = self._job_from_legacy_dict(updated_dict, existing_id=current.id)
@@ -915,7 +917,8 @@ class Replicator(QMainWindow):
             return
 
         current = self._jobs[idx]
-        dlg = ScheduleDialog(self, job=current.to_legacy_dict())
+        # Pass configured service.defaultInterval into the schedule editor so defaults match user config
+        dlg = ScheduleDialog(self, job=current.to_legacy_dict(), default_interval_seconds=self._default_interval_seconds())
         if dlg.exec_() == QDialog.Accepted:
             d = current.to_legacy_dict()
             d["schedule"] = dlg.value()
