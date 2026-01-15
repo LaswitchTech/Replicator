@@ -523,8 +523,6 @@ class Replicator(QMainWindow):
 
         self._fs = FileSystem(helper=self._helper, logger=self._logger)
 
-        # Legacy configuration jobs bootstrap removed.
-
         # --- Database path setup ---
         # Use Helper.get_cwd() if present, else os.getcwd()
         if hasattr(self._helper, "get_cwd") and callable(getattr(self._helper, "get_cwd", None)):
