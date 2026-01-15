@@ -101,7 +101,14 @@ class Migration:
             try:
                 with self._db.transaction():
                     for stmt in stmts:
-                        self._db.execute(stmt)
+                        try:
+                            self._db.execute(stmt)
+                        except Exception as e:
+                            # SQLite: ignore duplicate column errors when applying additive migrations on fresh schemas
+                            msg = str(e).lower()
+                            if "duplicate column name" in msg:
+                                continue
+                            raise
                     self._db.execute("INSERT INTO schema_migrations (name) VALUES (?)", (name,))
 
                 self._log(f"[Migration] applied {name}", level="debug")
@@ -163,10 +170,14 @@ class Migration:
                         created DATETIME DEFAULT CURRENT_TIMESTAMP,
                         modified DATETIME DEFAULT CURRENT_TIMESTAMP,
                         jobId INTEGER NOT NULL UNIQUE,
-                        enabled INTEGER NOT NULL DEFAULT 0,
+                        -- Default schedule: enabled, all day/every day via empty windows (interpreted as always allowed),
+                        -- intervalSeconds=3600 (1h). Keep everyMinutes for backward compatibility.
+                        enabled INTEGER NOT NULL DEFAULT 1,
+                        intervalSeconds INTEGER NOT NULL DEFAULT 3600,
                         everyMinutes INTEGER NOT NULL DEFAULT 60,
                         nextRunAt TEXT NULL,
                         lastScheduledRunAt TEXT NULL,
+                        windows TEXT NULL,
                         FOREIGN KEY(jobId) REFERENCES jobs(id) ON DELETE CASCADE
                     );
                     """,
@@ -257,9 +268,25 @@ class Migration:
             (
                 "0004_schedule_windows",
                 [
-                    # Store schedule windows as JSON (dict weekday -> list[{start,end},...])
-                    # This is the minimal schema required to support your UI scheduling window editor.
+                    # Add windows if missing (SQLite has no IF NOT EXISTS for ADD COLUMN; ignore error if it already exists)
+                    """
+                    SELECT 1;
+                    """,
+                    """
+                    -- handled in code: Migration will attempt the ALTER; if it fails due to duplicate column, it should be ignored.
+                    """,
                     "ALTER TABLE schedule ADD COLUMN windows TEXT NULL;",
+                ],
+            ),
+            (
+                "0005_schedule_interval_seconds",
+                [
+                    # Add global interval in seconds (new schedule model). Keep legacy everyMinutes for compatibility.
+                    "ALTER TABLE schedule ADD COLUMN intervalSeconds INTEGER NOT NULL DEFAULT 3600;",
+                    # Backfill intervalSeconds from everyMinutes where possible (existing rows).
+                    "UPDATE schedule SET intervalSeconds = CASE WHEN intervalSeconds IS NULL OR intervalSeconds <= 0 THEN (everyMinutes * 60) ELSE intervalSeconds END;",
+                    # Ensure enabled defaults to on for existing rows that still have the legacy default off (best-effort).
+                    "UPDATE schedule SET enabled = 1 WHERE enabled IS NULL;",
                 ],
             ),
         ]

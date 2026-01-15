@@ -716,10 +716,88 @@ class Replicator(QMainWindow):
 
             self._table.setItem(r, 5, _it(job.lastResult or ""))
 
+    def _default_interval_seconds(self) -> int:
+        """Return the configured default interval in seconds (service.defaultInterval), fallback to 3600."""
+        try:
+            v = self._configuration.get("service.defaultInterval", 3600)
+            iv = int(v)
+            return iv if iv > 0 else 3600
+        except Exception:
+            return 3600
+
+    def _default_schedule_dict(self) -> Dict[str, Any]:
+        interval = self._default_interval_seconds()
+        windows: Dict[str, Any] = {}
+        for wd in range(7):
+            windows[str(wd)] = [{"start": "00:00", "end": "23:59", "intervalSeconds": interval}]
+        return {
+            "enabled": True,
+            "intervalSeconds": interval,
+            "windows": windows,
+        }
+
+    def _schedule_interval_seconds_for_now(self, sched: Dict[str, Any]) -> int:
+        """Best-effort interval seconds for logging (supports per-day interval stored in window dicts)."""
+        try:
+            windows = sched.get("windows") if isinstance(sched.get("windows"), dict) else {}
+            wd = datetime.now(timezone.utc).weekday()
+            day = windows.get(str(wd)) or windows.get(wd)  # type: ignore[index]
+            if isinstance(day, list) and day and isinstance(day[0], dict):
+                v = day[0].get("intervalSeconds")
+                if v is not None:
+                    return int(v)
+        except Exception:
+            pass
+
+        default_interval = self._default_interval_seconds()
+
+        try:
+            if "intervalSeconds" in sched:
+                v = int(sched.get("intervalSeconds") or 0)
+                return v if v > 0 else default_interval
+        except Exception:
+            pass
+        try:
+            v = int(sched.get("everyMinutes", 60) or 60) * 60
+            return v if v > 0 else default_interval
+        except Exception:
+            return default_interval
+
     def _job_from_legacy_dict(self, d: Dict[str, Any], *, existing_id: Optional[int] = None) -> Job:
         src = d.get("sourceEndpoint") or {"type": "local", "location": d.get("source", ""), "auth": {}}
         tgt = d.get("targetEndpoint") or {"type": "local", "location": d.get("target", ""), "auth": {}}
-        sched = d.get("schedule") or {}
+
+        # Schedule defaults:
+        #   - enabled
+        #   - every day, all day
+        #   - interval 3600 seconds (1h)
+        sched = d.get("schedule")
+        if not isinstance(sched, dict):
+            sched = self._default_schedule_dict()
+
+        default_interval = self._default_interval_seconds()
+
+        # Backward compatibility: accept older key `everyMinutes`
+        if "intervalSeconds" not in sched:
+            try:
+                v = int(sched.get("everyMinutes", 60) or 60) * 60
+                sched["intervalSeconds"] = v if v > 0 else default_interval
+            except Exception:
+                sched["intervalSeconds"] = default_interval
+
+        # Ensure windows exist; if missing, make it "every day, all day" with per-day interval
+        windows = sched.get("windows")
+        if not isinstance(windows, dict) or not windows:
+            windows = {}
+            for wd in range(7):
+                windows[str(wd)] = [{"start": "00:00", "end": "23:59", "intervalSeconds": int(sched.get("intervalSeconds") or default_interval)}]
+            sched["windows"] = windows
+        else:
+            # Ensure each enabled day window includes intervalSeconds (per-day) for the upcoming scheduler logic
+            for k, v in list(windows.items()):
+                if isinstance(v, list) and v and isinstance(v[0], dict):
+                    if "intervalSeconds" not in v[0]:
+                        v[0]["intervalSeconds"] = int(sched.get("intervalSeconds") or default_interval)
 
         j = Job(
             id=existing_id,
@@ -748,9 +826,19 @@ class Replicator(QMainWindow):
         )
 
         windows = sched.get("windows") if isinstance(sched.get("windows"), dict) else {}
+
+        # NOTE: The domain model currently uses `everyMinutes`.
+        # For now, we map intervalSeconds -> everyMinutes (rounded down, minimum 1) for compatibility.
+        interval_seconds = default_interval
+        try:
+            interval_seconds = int(sched.get("intervalSeconds") or default_interval)
+        except Exception:
+            interval_seconds = default_interval
+        every_minutes = max(1, int(interval_seconds // 60))
+
         j.schedule = Schedule(
-            enabled=bool(sched.get("enabled", False)),
-            everyMinutes=int(sched.get("everyMinutes", 60) or 60),
+            enabled=bool(sched.get("enabled", True)),
+            everyMinutes=every_minutes,
             windows=windows,
         )
 
@@ -760,6 +848,8 @@ class Replicator(QMainWindow):
         dlg = JobDialog(self)
         if dlg.exec_() == QDialog.Accepted:
             new_job_dict = dlg.value()
+            if "schedule" not in new_job_dict or not isinstance(new_job_dict.get("schedule"), dict):
+                new_job_dict["schedule"] = self._default_schedule_dict()
             job_obj = self._job_from_legacy_dict(new_job_dict)
             job_id = self._store.upsert(job_obj)
             job_obj.id = job_id
@@ -907,15 +997,16 @@ class Replicator(QMainWindow):
         preserve_metadata = bool(job.preserveMetadata)
         mode = job.mode
         direction = job.direction
-        schedule = job.schedule.__dict__ if job.schedule else {}
+        schedule = job.to_legacy_dict().get("schedule") or {}
 
         if not src or not dst:
             self._log(f"[Replicator] Job '{name}' invalid: missing source/target.", level="error")
             return False
 
         sched_str = ""
-        if getattr(job.schedule, "enabled", False):
-            sched_str = f", schedule=Every {getattr(job.schedule, 'everyMinutes', 60)} min"
+        if isinstance(schedule, dict) and bool(schedule.get("enabled", True)):
+            interval_s = self._schedule_interval_seconds_for_now(schedule)
+            sched_str = f", schedule=Interval {interval_s}s"
         logline = f"[Replicator] Running job '{name}': {src} -> {dst} (mode={mode}, direction={direction}, delete={allow_deletion}, meta={preserve_metadata}{sched_str}"
         logline += f", srcType={src_type}, dstType={dst_type})"
         self._log(logline)

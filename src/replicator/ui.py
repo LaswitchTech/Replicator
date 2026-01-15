@@ -35,7 +35,7 @@ except ImportError:
 # Job Dialog
 # ------------------------------------------------------------------
 class JobDialog(QDialog):
-    def __init__(self, parent=None, job: Optional[Dict[str, Any]] = None):
+    def __init__(self, parent=None, job: Optional[Dict[str, Any]] = None, *, default_interval_seconds: Optional[int] = None):
         super().__init__(parent)
         self.setWindowTitle("Replication Job")
         self.setModal(True)
@@ -45,6 +45,15 @@ class JobDialog(QDialog):
 
         job = job or {}
         self._original_job = job
+
+        # Default interval for new schedules (seconds). Provided by the app (e.g. Configuration service.defaultInterval).
+        try:
+            di = int(default_interval_seconds) if default_interval_seconds is not None else 3600
+        except Exception:
+            di = 3600
+        if di <= 0:
+            di = 3600
+        self._default_interval_seconds = di
 
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignTop)
@@ -249,7 +258,7 @@ class JobDialog(QDialog):
 
     def _open_schedule(self) -> None:
         job = self._original_job if isinstance(self._original_job, dict) else {}
-        dlg = ScheduleDialog(self, job=job)
+        dlg = ScheduleDialog(self, job=job, default_interval_seconds=self._default_interval_seconds)
         if dlg.exec_() == QDialog.Accepted:
             # store schedule back into original job dict so value() preserves it
             if not isinstance(self._original_job, dict):
@@ -615,8 +624,11 @@ class ScheduleDialog(QDialog):
     Persists as:
       schedule = {
         "enabled": bool,
-        "everyMinutes": int,
-        "windows": { "0":[{"start":"22:00","end":"06:00"}], ... }
+        "intervalSeconds": int,   # global default/fallback
+        "windows": {
+          "0":[{"start":"22:00","end":"06:00","intervalSeconds":3600}],
+          ...
+        }
       }
     """
 
@@ -630,13 +642,47 @@ class ScheduleDialog(QDialog):
         (6, "Sunday"),
     ]
 
-    def __init__(self, parent=None, job: Optional[Dict[str, Any]] = None):
+    def __init__(self, parent=None, job: Optional[Dict[str, Any]] = None, *, default_interval_seconds: Optional[int] = None):
         super().__init__(parent)
         self.setWindowTitle("Schedule")
         self.setModal(True)
 
+        # Default interval for new schedules (seconds). Provided by the app (e.g. Configuration service.defaultInterval).
+        try:
+            di = int(default_interval_seconds) if default_interval_seconds is not None else 3600
+        except Exception:
+            di = 3600
+        if di <= 0:
+            di = 3600
+        self._default_interval_seconds = di
+
         job = job or {}
-        schedule = job.get("schedule", {}) if isinstance(job.get("schedule", {}), dict) else {}
+        schedule = job.get("schedule") if isinstance(job.get("schedule"), dict) else {}
+        if not schedule:
+            # Default schedule: enabled, every day, all day, default interval
+            schedule = {"enabled": True, "intervalSeconds": int(self._default_interval_seconds), "windows": {}}
+            for wd in range(7):
+                schedule["windows"][str(wd)] = [{"start": "00:00", "end": "23:59", "intervalSeconds": int(self._default_interval_seconds)}]
+        else:
+            # Backward compatibility: everyMinutes -> intervalSeconds
+            if "intervalSeconds" not in schedule:
+                try:
+                    schedule["intervalSeconds"] = int(schedule.get("everyMinutes", 60) or 60) * 60
+                except Exception:
+                    schedule["intervalSeconds"] = int(self._default_interval_seconds)
+            # Ensure windows exists; if missing, default to every day all day
+            if not isinstance(schedule.get("windows"), dict) or not schedule.get("windows"):
+                schedule["windows"] = {}
+                for wd in range(7):
+                    schedule["windows"][str(wd)] = [{"start": "00:00", "end": "23:59", "intervalSeconds": int(schedule.get("intervalSeconds") or self._default_interval_seconds)}]
+            else:
+                # Ensure each day window has intervalSeconds
+                try:
+                    for _k, _v in list(schedule["windows"].items()):
+                        if isinstance(_v, list) and _v and isinstance(_v[0], dict) and "intervalSeconds" not in _v[0]:
+                            _v[0]["intervalSeconds"] = int(schedule.get("intervalSeconds") or self._default_interval_seconds)
+                except Exception:
+                    pass
 
         self._windows: Dict[str, Any] = schedule.get("windows", {}) if isinstance(schedule.get("windows", {}), dict) else {}
 
@@ -650,12 +696,12 @@ class ScheduleDialog(QDialog):
         self.enabled = QCheckBox()
         self.enabled.setChecked(bool(schedule.get("enabled", False)))
 
-        self.every_minutes = QSpinBox()
-        self.every_minutes.setRange(1, 10080)
-        self.every_minutes.setValue(int(schedule.get("everyMinutes", 60)))
+        self.interval_seconds = QSpinBox()
+        self.interval_seconds.setRange(1, 604800)  # 1s .. 7 days
+        self.interval_seconds.setValue(int(schedule.get("intervalSeconds", self._default_interval_seconds) or self._default_interval_seconds))
 
         form.addRow("Enabled", self.enabled)
-        form.addRow("Every minutes", self.every_minutes)
+        form.addRow("Interval (in seconds)", self.interval_seconds)
 
         # Windows editor
         win_frame = QFrame()
@@ -682,6 +728,11 @@ class ScheduleDialog(QDialog):
             start.setTime(QTime(0, 0))
             end.setTime(QTime(23, 59))
 
+            interval = QSpinBox()
+            interval.setRange(1, 604800)  # 1s .. 7 days
+            interval.setFixedWidth(130)
+            interval.setValue(int(schedule.get("intervalSeconds", self._default_interval_seconds) or self._default_interval_seconds))
+
             # Load from existing windows if present
             key = str(wd)
             day_windows = self._windows.get(key)
@@ -692,14 +743,23 @@ class ScheduleDialog(QDialog):
                 day_enabled.setChecked(True)
                 start.setTime(self._parse_qtime(s, QTime(0, 0)))
                 end.setTime(self._parse_qtime(e, QTime(23, 59)))
+                try:
+                    interval.setValue(int(w0.get("intervalSeconds", schedule.get("intervalSeconds", self._default_interval_seconds)) or self._default_interval_seconds))
+                except Exception:
+                    interval.setValue(int(schedule.get("intervalSeconds", self._default_interval_seconds) or self._default_interval_seconds))
             else:
                 day_enabled.setChecked(False)
+                try:
+                    interval.setValue(int(schedule.get("intervalSeconds", self._default_interval_seconds) or self._default_interval_seconds))
+                except Exception:
+                    interval.setValue(int(self._default_interval_seconds))
 
             # Disable edits when not enabled
-            def _apply_enabled_state(_=None, *, _day_enabled=day_enabled, _start=start, _end=end):
+            def _apply_enabled_state(_=None, *, _day_enabled=day_enabled, _start=start, _end=end, _interval=interval):
                 en = _day_enabled.isChecked()
                 _start.setEnabled(en)
                 _end.setEnabled(en)
+                _interval.setEnabled(en)
 
             day_enabled.stateChanged.connect(_apply_enabled_state)
             _apply_enabled_state()
@@ -709,10 +769,12 @@ class ScheduleDialog(QDialog):
             row.addWidget(start)
             row.addWidget(QLabel("End"))
             row.addWidget(end)
+            row.addWidget(QLabel("Interval (s)"))
+            row.addWidget(interval)
 
             win_lay.addLayout(row)
 
-            self._day_controls[wd] = {"enabled": day_enabled, "start": start, "end": end}
+            self._day_controls[wd] = {"enabled": day_enabled, "start": start, "end": end, "interval": interval}
 
         layout.addWidget(win_frame)
 
@@ -732,18 +794,20 @@ class ScheduleDialog(QDialog):
 
     def _sync_enabled_state(self):
         en = self.enabled.isChecked()
-        self.every_minutes.setEnabled(en)
+        self.interval_seconds.setEnabled(en)
         for wd, ctrls in self._day_controls.items():
             ctrls["enabled"].setEnabled(en)
             # if schedule disabled, visually disable time edits too
             if not en:
                 ctrls["start"].setEnabled(False)
                 ctrls["end"].setEnabled(False)
+                ctrls["interval"].setEnabled(False)
             else:
                 # restore per-day checkbox logic
                 day_en = ctrls["enabled"].isChecked()
                 ctrls["start"].setEnabled(day_en)
                 ctrls["end"].setEnabled(day_en)
+                ctrls["interval"].setEnabled(day_en)
 
     def _parse_qtime(self, s: str, default: QTime) -> QTime:
         try:
@@ -759,9 +823,17 @@ class ScheduleDialog(QDialog):
             return default
 
     def _on_ok(self):
-        if self.enabled.isChecked() and self.every_minutes.value() < 1:
-            MsgBox.show(self, "Schedule", "Every minutes must be at least 1 if enabled.", icon="warning")
+        if self.enabled.isChecked() and self.interval_seconds.value() < 1:
+            MsgBox.show(self, "Schedule", "Interval (in seconds) must be at least 1 if enabled.", icon="warning")
             return
+
+        if self.enabled.isChecked():
+            for _wd, ctrls in self._day_controls.items():
+                if not ctrls["enabled"].isChecked():
+                    continue
+                if int(ctrls["interval"].value() or 0) < 1:
+                    MsgBox.show(self, "Schedule", "Per-day interval must be at least 1 second for enabled days.", icon="warning")
+                    return
 
         # Basic validation: ensure enabled days have valid times (QTimeEdit ensures format)
         # Allow overnight windows naturally (start > end) — that's intended.
@@ -769,16 +841,20 @@ class ScheduleDialog(QDialog):
 
     def value(self) -> Dict[str, Any]:
         windows: Dict[str, Any] = {}
+
         if self.enabled.isChecked():
             for wd, ctrls in self._day_controls.items():
                 if not ctrls["enabled"].isChecked():
                     continue
                 s = ctrls["start"].time().toString("HH:mm")
                 e = ctrls["end"].time().toString("HH:mm")
-                windows[str(wd)] = [{"start": s, "end": e}]
+                itv = int(ctrls["interval"].value())
+                windows[str(wd)] = [{"start": s, "end": e, "intervalSeconds": itv}]
 
         return {
             "enabled": bool(self.enabled.isChecked()),
-            "everyMinutes": int(self.every_minutes.value()),
+            "intervalSeconds": int(self.interval_seconds.value()),
+            # Backward compatibility (old key) for any older code paths:
+            "everyMinutes": max(1, int(int(self.interval_seconds.value()) // 60)),
             "windows": windows,
         }
