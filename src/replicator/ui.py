@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Optional, Any, Dict, List, Tuple
 
-from PyQt5.QtCore import Qt, QTime
+from PyQt5.QtCore import Qt, QTime, pyqtSignal
 from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -23,12 +23,28 @@ from PyQt5.QtWidgets import (
     QSizePolicy,
     QLayout,
     QTimeEdit,
+    QFileDialog,
 )
 
 try:
     from core.ui import MsgBox
 except ImportError:
     from ui import MsgBox
+
+
+# ------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------
+class BrowseLineEdit(QLineEdit):
+    """QLineEdit that emits a signal when clicked (used to open browse dialogs)."""
+    clicked = pyqtSignal()
+
+    def mousePressEvent(self, event):
+        try:
+            self.clicked.emit()
+        except Exception:
+            pass
+        super().mousePressEvent(event)
 
 
 # ------------------------------------------------------------------
@@ -279,7 +295,7 @@ class JobDialog(QDialog):
         type_combo.setProperty("existing_type", existing.get("type", "local"))
         type_combo.setProperty("existing_auth", existing.get("auth", {}) or {})
 
-        location_edit = QLineEdit(existing.get("location", ""))
+        location_edit = BrowseLineEdit(existing.get("location", ""))
 
         port_spin = QSpinBox()
         port_spin.setRange(1, 65535)
@@ -301,6 +317,29 @@ class JobDialog(QDialog):
         fields_lay.addWidget(type_combo)
         fields_lay.addWidget(location_edit, 1)
         fields_lay.addWidget(port_spin)
+
+        def _browse_location():
+            try:
+                typ = (type_combo.currentText() or "").lower()
+                if typ != "local":
+                    return
+                start_dir = location_edit.text().strip() or ""
+                # If the user typed a file path, prefer its directory.
+                if start_dir and not start_dir.endswith("/") and not start_dir.endswith("\\"):
+                    try:
+                        import os
+                        if os.path.isfile(start_dir):
+                            start_dir = os.path.dirname(start_dir)
+                    except Exception:
+                        pass
+                selected = QFileDialog.getExistingDirectory(self, "Select folder", start_dir)
+                if selected:
+                    location_edit.setText(selected)
+            except Exception:
+                return
+
+        # Click-to-browse for local paths (no extra button needed).
+        location_edit.clicked.connect(_browse_location)
 
         endpoint_row = QWidget()
         endpoint_row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -454,6 +493,10 @@ class JobDialog(QDialog):
             "ssh": "SSH host/path (e.g. example.com:/folder)",
         }.get(typ, "")
         location_edit.setPlaceholderText(placeholder)
+        # For local endpoints, clicking the location field opens a folder chooser.
+        # For non-local endpoints, keep normal typing behavior.
+        if (typ or "").lower() == "local":
+            location_edit.setCursorPosition(len(location_edit.text()))
 
         if typ in ("ftp", "ssh"):
             port_spin.setVisible(True)
