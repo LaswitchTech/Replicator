@@ -269,7 +269,8 @@ class Schedule:
     def should_run_now(self, now: Optional[datetime] = None) -> bool:
         if not self.enabled:
             return False
-        now = now or datetime.now(timezone.utc)
+        # Windows are defined in local (wall-clock) time.
+        now = now or datetime.now().astimezone()
         return self._in_window_for_day(now)
 
     def next_run_at(self, now: Optional[datetime] = None) -> Optional[datetime]:
@@ -281,7 +282,8 @@ class Schedule:
         if not self.enabled:
             return None
 
-        now = now or datetime.now(timezone.utc)
+        # Windows are defined in local (wall-clock) time.
+        now = now or datetime.now().astimezone()
         # Start looking from next second (normalized)
         cur = now.replace(microsecond=0) + timedelta(seconds=1)
 
@@ -493,6 +495,7 @@ class Job:
         sched_row = {
             "enabled": 1 if self.schedule.enabled else 0,
             "everyMinutes": int(getattr(self.schedule, "everyMinutes", compat_minutes) or compat_minutes),
+            "intervalSeconds": int(getattr(self.schedule, "interval_seconds", lambda: global_interval)()),
             "nextRunAt": self.schedule.nextRunAt,
             "lastScheduledRunAt": self.schedule.lastScheduledRunAt,
             "windows": json.dumps(self.schedule.windows or {}) if self.schedule.windows else None,
@@ -810,6 +813,7 @@ class JobStore:
                 "jobId": job_id,
                 "enabled": int(schedule_row.get("enabled") or 0),
                 "everyMinutes": int(schedule_row.get("everyMinutes") or 1),
+                "intervalSeconds": int(schedule_row.get("intervalSeconds") or 0),
                 "nextRunAt": schedule_row.get("nextRunAt"),
                 "lastScheduledRunAt": schedule_row.get("lastScheduledRunAt"),
                 "windows": schedule_row.get("windows"),
@@ -818,7 +822,7 @@ class JobStore:
                 "schedule",
                 s_data,
                 ["jobId"],
-                update_columns=["enabled", "everyMinutes", "nextRunAt", "lastScheduledRunAt", "windows"],
+                update_columns=["enabled", "everyMinutes", "intervalSeconds", "nextRunAt", "lastScheduledRunAt", "windows"],
             )
 
         return int(job.id or 0)
