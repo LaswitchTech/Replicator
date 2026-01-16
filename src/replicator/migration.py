@@ -170,11 +170,9 @@ class Migration:
                         created DATETIME DEFAULT CURRENT_TIMESTAMP,
                         modified DATETIME DEFAULT CURRENT_TIMESTAMP,
                         jobId INTEGER NOT NULL UNIQUE,
-                        -- Default schedule: enabled, all day/every day via empty windows (interpreted as always allowed),
-                        -- intervalSeconds=3600 (1h). Keep everyMinutes for backward compatibility.
+                        -- Schedule is controlled via per-day windows and intervalSeconds.
                         enabled INTEGER NOT NULL DEFAULT 1,
                         intervalSeconds INTEGER NOT NULL DEFAULT 3600,
-                        everyMinutes INTEGER NOT NULL DEFAULT 60,
                         nextRunAt TEXT NULL,
                         lastScheduledRunAt TEXT NULL,
                         windows TEXT NULL,
@@ -215,6 +213,8 @@ class Migration:
                         deleted INTEGER NOT NULL DEFAULT 0,
                         deletedAt TEXT NULL,
                         meta TEXT NULL,
+                        lastSeenAt TEXT NULL,
+                        lastSeenRunId INTEGER NULL,
                         FOREIGN KEY(jobId) REFERENCES jobs(id) ON DELETE CASCADE
                     );
                     """,
@@ -243,18 +243,8 @@ class Migration:
                     );
                     """,
                     "CREATE INDEX IF NOT EXISTS idx_conflicts_job_status ON conflicts(jobId, status);",
-                ],
-            ),
-            (
-                "0002_file_state_last_seen",
-                [
-                    "ALTER TABLE file_state ADD COLUMN lastSeenAt TEXT NULL;",
-                    "ALTER TABLE file_state ADD COLUMN lastSeenRunId INTEGER NULL;",
-                ],
-            ),
-            (
-                "0003_meta_kv",
-                [
+
+                    # meta (simple KV store)
                     """
                     CREATE TABLE IF NOT EXISTS meta (
                         key TEXT PRIMARY KEY,
@@ -263,30 +253,6 @@ class Migration:
                         value TEXT NULL
                     );
                     """,
-                ],
-            ),
-            (
-                "0004_schedule_windows",
-                [
-                    # Add windows if missing (SQLite has no IF NOT EXISTS for ADD COLUMN; ignore error if it already exists)
-                    """
-                    SELECT 1;
-                    """,
-                    """
-                    -- handled in code: Migration will attempt the ALTER; if it fails due to duplicate column, it should be ignored.
-                    """,
-                    "ALTER TABLE schedule ADD COLUMN windows TEXT NULL;",
-                ],
-            ),
-            (
-                "0005_schedule_interval_seconds",
-                [
-                    # Add global interval in seconds (new schedule model). Keep legacy everyMinutes for compatibility.
-                    "ALTER TABLE schedule ADD COLUMN intervalSeconds INTEGER NOT NULL DEFAULT 3600;",
-                    # Backfill intervalSeconds from everyMinutes where possible (existing rows).
-                    "UPDATE schedule SET intervalSeconds = CASE WHEN intervalSeconds IS NULL OR intervalSeconds <= 0 THEN (everyMinutes * 60) ELSE intervalSeconds END;",
-                    # Ensure enabled defaults to on for existing rows that still have the legacy default off (best-effort).
-                    "UPDATE schedule SET enabled = 1 WHERE enabled IS NULL;",
                 ],
             ),
         ]

@@ -135,171 +135,218 @@ class Endpoint:
         return Endpoint(type=t, location=row.get("location") or "", auth=auth)
 
 
-@dataclass(frozen=True)
+@dataclass
 class Schedule:
-    """Job schedule.
-
-    New model:
-      - intervalSeconds: global default interval
-      - windows: dict weekday -> list[window]
-          where window = {"start":"HH:mm","end":"HH:mm","intervalSeconds":int(optional)}
-
-    Backward compatibility:
-      - everyMinutes is kept for legacy callers / older DB rows.
-      - If intervalSeconds is missing, it is derived from everyMinutes * 60.
-    """
-
     enabled: bool = True
-
-    # New
     intervalSeconds: int = 3600
+    windows: Dict[str, Any] = field(default_factory=dict)
 
-    # Legacy
-    everyMinutes: int = 60
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "enabled": bool(self.enabled),
+            "intervalSeconds": int(self.intervalSeconds or 0),
+            "windows": self.windows if isinstance(self.windows, dict) else {},
+        }
 
-    # persisted as JSON in schedule.windows
-    windows: JsonDict = field(default_factory=dict)
-
-    nextRunAt: Optional[str] = None
-    lastScheduledRunAt: Optional[str] = None
+    @staticmethod
+    def from_dict(d: Optional[Dict[str, Any]]) -> "Schedule":
+        d = d or {}
+        enabled = bool(d.get("enabled", True))
+        # intervalSeconds can be on the schedule itself, or in per-day window objects
+        try:
+            interval_s = int(d.get("intervalSeconds") or 0)
+        except Exception:
+            interval_s = 0
+        windows = d.get("windows") if isinstance(d.get("windows"), dict) else {}
+        if interval_s <= 0:
+            # best-effort: derive from first window on any day
+            try:
+                for _k, _v in windows.items():
+                    if isinstance(_v, list) and _v and isinstance(_v[0], dict):
+                        v = _v[0].get("intervalSeconds")
+                        if v is not None:
+                            interval_s = int(v or 0)
+                            break
+            except Exception:
+                pass
+        if interval_s <= 0:
+            interval_s = 3600
+        return Schedule(enabled=enabled, intervalSeconds=interval_s, windows=windows)
 
     def validate(self) -> List[str]:
         errs: List[str] = []
         if self.enabled:
-            if int(self.interval_seconds()) <= 0:
+            try:
+                iv = int(self.intervalSeconds or 0)
+            except Exception:
+                iv = 0
+            if iv <= 0:
                 errs.append("Schedule intervalSeconds must be > 0 when schedule is enabled.")
+        # windows is optional; if provided, validate structure best-effort
         if self.windows and not isinstance(self.windows, dict):
-            errs.append("Schedule windows must be a dict of weekday -> list[window].")
+            errs.append("Schedule windows must be an object/dict.")
+            return errs
+
+        def _parse_hhmm(val: Any) -> Optional[Tuple[int, int]]:
+            try:
+                parts = str(val).strip().split(":")
+                if len(parts) != 2:
+                    return None
+                hh = int(parts[0]); mm = int(parts[1])
+                if hh < 0 or hh > 23 or mm < 0 or mm > 59:
+                    return None
+                return (hh, mm)
+            except Exception:
+                return None
+
+        try:
+            for _day, arr in (self.windows or {}).items():
+                if not isinstance(arr, list):
+                    errs.append("Schedule windows entries must be lists.")
+                    continue
+                for w in arr:
+                    if not isinstance(w, dict):
+                        errs.append("Schedule window must be an object.")
+                        continue
+                    if _parse_hhmm(w.get("start")) is None:
+                        errs.append("Schedule window start must be HH:MM.")
+                    if _parse_hhmm(w.get("end")) is None:
+                        errs.append("Schedule window end must be HH:MM.")
+                    if "intervalSeconds" in w:
+                        try:
+                            if int(w.get("intervalSeconds") or 0) <= 0:
+                                errs.append("Schedule window intervalSeconds must be > 0 when provided.")
+                        except Exception:
+                            errs.append("Schedule window intervalSeconds must be an integer.")
+        except Exception:
+            # best-effort validation only
+            pass
+
         return errs
 
-    def interval_seconds(self) -> int:
-        """Return global interval in seconds (always >= 1 when enabled)."""
-        try:
-            s = int(self.intervalSeconds or 0)
-        except Exception:
-            s = 0
-        if s > 0:
-            return s
-        # fallback from legacy minutes
-        try:
-            m = int(self.everyMinutes or 0)
-        except Exception:
-            m = 0
-        if m <= 0:
-            return 1
-        return max(1, m * 60)
-
-    def _parse_hhmm(self, s: str) -> Optional[time]:
-        try:
-            parts = s.strip().split(":")
-            if len(parts) != 2:
-                return None
-            hh = int(parts[0])
-            mm = int(parts[1])
-            if hh < 0 or hh > 23 or mm < 0 or mm > 59:
-                return None
-            return time(hour=hh, minute=mm)
-        except Exception:
-            return None
-
-    def _day_windows(self, weekday: int) -> List[Dict[str, Any]]:
-        if not self.windows:
-            return []
-        dw = self.windows.get(str(weekday))
-        if dw is None:
-            dw = self.windows.get(weekday)
-        if not isinstance(dw, list):
-            return []
-        out: List[Dict[str, Any]] = []
-        for w in dw:
-            if isinstance(w, dict):
-                out.append(w)
-        return out
-
-    def _interval_for_day(self, weekday: int) -> int:
-        """Return the intervalSeconds for a weekday.
-
-        If windows are configured for that weekday and the first window includes intervalSeconds, use it.
-        Otherwise fall back to global intervalSeconds.
-        """
-        day_ws = self._day_windows(weekday)
-        if day_ws:
-            w0 = day_ws[0]
-            if "intervalSeconds" in w0:
-                try:
-                    v = int(w0.get("intervalSeconds") or 0)
-                    if v > 0:
-                        return v
-                except Exception:
-                    pass
-        return self.interval_seconds()
-
-    def _in_window_for_day(self, dt: datetime) -> bool:
-        # No windows configured => always allowed.
-        if not self.windows:
+    def _window_allows_now_local(self, now_local: datetime) -> bool:
+        # If windows is empty/missing => allowed.
+        if not self.windows or not isinstance(self.windows, dict):
             return True
 
-        wd = dt.weekday()  # 0..6
-        day_windows = self._day_windows(wd)
-        if not day_windows:
+        wd = now_local.weekday()  # 0..6 (Mon..Sun)
+        day_windows = self.windows.get(str(wd)) or self.windows.get(wd)
+        if not isinstance(day_windows, list) or not day_windows:
             return False
 
-        tnow = dt.timetz().replace(tzinfo=None)
+        tnow = now_local.time().replace(tzinfo=None)
+
+        def _parse_hhmm(val: Any) -> Optional[Tuple[int, int]]:
+            try:
+                parts = str(val).strip().split(":")
+                if len(parts) != 2:
+                    return None
+                hh = int(parts[0]); mm = int(parts[1])
+                if hh < 0 or hh > 23 or mm < 0 or mm > 59:
+                    return None
+                return (hh, mm)
+            except Exception:
+                return None
 
         for w in day_windows:
-            s = w.get("start")
-            e = w.get("end")
-            if not s or not e:
+            if not isinstance(w, dict):
                 continue
-            ts = self._parse_hhmm(str(s))
-            te = self._parse_hhmm(str(e))
-            if ts is None or te is None:
+            ps = _parse_hhmm(w.get("start"))
+            pe = _parse_hhmm(w.get("end"))
+            if ps is None or pe is None:
                 continue
+            sh, sm = ps; eh, em = pe
+            ts = datetime(2000, 1, 1, sh, sm).time()
+            te = datetime(2000, 1, 1, eh, em).time()
 
             if ts <= te:
                 if ts <= tnow <= te:
                     return True
             else:
-                # overnight window (e.g., 22:00 -> 06:00)
+                # overnight window (e.g. 22:00-06:00)
                 if tnow >= ts or tnow <= te:
                     return True
 
         return False
 
+    def interval_seconds_for_now(self, now: Optional[datetime] = None) -> int:
+        now_local = (now or datetime.now(timezone.utc)).astimezone()
+        # Priority:
+        #   1) per-day window intervalSeconds (first window entry)
+        #   2) schedule.intervalSeconds
+        try:
+            wd = now_local.weekday()
+            day = None
+            if isinstance(self.windows, dict):
+                day = self.windows.get(str(wd)) or self.windows.get(wd)
+            if isinstance(day, list) and day and isinstance(day[0], dict):
+                v = day[0].get("intervalSeconds")
+                if v is not None:
+                    iv = int(v or 0)
+                    if iv > 0:
+                        return iv
+        except Exception:
+            pass
+
+        try:
+            iv = int(self.intervalSeconds or 0)
+            return iv if iv > 0 else 3600
+        except Exception:
+            return 3600
+
     def should_run_now(self, now: Optional[datetime] = None) -> bool:
         if not self.enabled:
             return False
-        # Windows are defined in local (wall-clock) time.
-        now = now or datetime.now().astimezone()
-        return self._in_window_for_day(now)
+        now_local = (now or datetime.now(timezone.utc)).astimezone()
+        return self._window_allows_now_local(now_local)
 
     def next_run_at(self, now: Optional[datetime] = None) -> Optional[datetime]:
-        """Compute the next aligned run time within allowed windows.
-
-        Alignment is based on Unix epoch seconds modulo the intervalSeconds for that day.
-        Searches up to 7 days ahead.
-        """
+        # This domain object doesn't store lastScheduledRunAt; caller should decide cadence.
+        # We return "now + interval" if windows allow now; otherwise the next allowed window start.
         if not self.enabled:
             return None
 
-        # Windows are defined in local (wall-clock) time.
-        now = now or datetime.now().astimezone()
-        # Start looking from next second (normalized)
-        cur = now.replace(microsecond=0) + timedelta(seconds=1)
+        now_utc = now or datetime.now(timezone.utc)
+        now_local = now_utc.astimezone()
 
-        limit = cur + timedelta(days=7)
-        while cur <= limit:
-            if self._in_window_for_day(cur):
-                interval = self._interval_for_day(cur.weekday())
-                if interval <= 0:
-                    interval = 1
-                try:
-                    epoch_sec = int(cur.timestamp())
-                except Exception:
-                    epoch_sec = 0
-                if (epoch_sec % int(interval)) == 0:
-                    return cur
-            cur += timedelta(seconds=1)
+        if self._window_allows_now_local(now_local):
+            return now_utc + timedelta(seconds=int(self.interval_seconds_for_now(now_utc)))
+
+        # Find next allowed window start within the next 7 days (best-effort).
+        if not self.windows or not isinstance(self.windows, dict):
+            return now_utc + timedelta(seconds=int(self.interval_seconds_for_now(now_utc)))
+
+        def _parse_hhmm(val: Any) -> Optional[Tuple[int, int]]:
+            try:
+                parts = str(val).strip().split(":")
+                if len(parts) != 2:
+                    return None
+                hh = int(parts[0]); mm = int(parts[1])
+                if hh < 0 or hh > 23 or mm < 0 or mm > 59:
+                    return None
+                return (hh, mm)
+            except Exception:
+                return None
+
+        base_local = now_local.replace(second=0, microsecond=0)
+        for add_days in range(0, 8):
+            day_local = base_local + timedelta(days=add_days)
+            wd = day_local.weekday()
+            day_windows = self.windows.get(str(wd)) or self.windows.get(wd)
+            if not isinstance(day_windows, list) or not day_windows:
+                continue
+            # use the first window as the start candidate (UI currently writes a single window per day)
+            w0 = day_windows[0] if isinstance(day_windows[0], dict) else None
+            if not w0:
+                continue
+            ps = _parse_hhmm(w0.get("start"))
+            if ps is None:
+                continue
+            sh, sm = ps
+            candidate_local = day_local.replace(hour=sh, minute=sm)
+            candidate_utc = candidate_local.astimezone(timezone.utc)
+            if candidate_utc > now_utc:
+                return candidate_utc
 
         return None
 
@@ -479,26 +526,10 @@ class Job:
             self.targetEndpoint.to_db_fields("target"),
         ]
 
-        # Persist the schedule windows as JSON; include per-day intervalSeconds inside windows.
-        # Keep everyMinutes for backward compatibility (best-effort conversion).
-        try:
-            global_interval = int(self.schedule.interval_seconds())
-        except Exception:
-            # Fall back to the schedule's declared defaults rather than a magic number
-            try:
-                global_interval = int(getattr(self.schedule, "intervalSeconds", 3600) or 3600)
-            except Exception:
-                global_interval = 3600
-
-        compat_minutes = max(1, int(round(float(global_interval) / 60.0)))
-
         sched_row = {
-            "enabled": 1 if self.schedule.enabled else 0,
-            "everyMinutes": int(getattr(self.schedule, "everyMinutes", compat_minutes) or compat_minutes),
-            "intervalSeconds": int(getattr(self.schedule, "interval_seconds", lambda: global_interval)()),
-            "nextRunAt": self.schedule.nextRunAt,
-            "lastScheduledRunAt": self.schedule.lastScheduledRunAt,
-            "windows": json.dumps(self.schedule.windows or {}) if self.schedule.windows else None,
+            "enabled": 1 if self.schedule and self.schedule.enabled else 0,
+            "intervalSeconds": int(self.schedule.intervalSeconds if self.schedule else 3600),
+            "windows": json.dumps(self.schedule.windows if self.schedule and isinstance(self.schedule.windows, dict) else {}),
         }
 
         return {
@@ -542,57 +573,28 @@ class Job:
         j.targetEndpoint = tgt or Endpoint()
 
         if schedule_row:
-            windows: JsonDict = {}
-            raw_windows = schedule_row.get("windows")
-            if raw_windows:
-                try:
-                    parsed = json.loads(raw_windows)
-                    if isinstance(parsed, dict):
-                        windows = parsed
-                except Exception:
-                    windows = {}
-
-            # Backward compatible interval handling:
-            # - Prefer intervalSeconds embedded in windows (per-day)
-            # - Else derive from everyMinutes
-            derived_seconds = None
+            # Read intervalSeconds and windows as new model, fallback as needed
             try:
-                # Try the first configured window's intervalSeconds
-                for _k, _v in (windows or {}).items():
-                    if isinstance(_v, list) and _v and isinstance(_v[0], dict) and "intervalSeconds" in _v[0]:
-                        iv = int(_v[0].get("intervalSeconds") or 0)
-                        if iv > 0:
-                            derived_seconds = iv
-                            break
+                interval_s = int(schedule_row.get("intervalSeconds") or 0)
             except Exception:
-                derived_seconds = None
-
-            if derived_seconds is None:
-                try:
-                    derived_seconds = int(schedule_row.get("everyMinutes", 60) or 60) * 60
-                except Exception:
-                    # Default to the Schedule dataclass default (intervalSeconds) rather than a scattered magic number
-                    derived_seconds = int(getattr(Schedule, "__dataclass_fields__", {}).get("intervalSeconds").default) if hasattr(Schedule, "__dataclass_fields__") else 3600
-
+                interval_s = 0
+            # Remove legacy everyMinutes fallback
+            if interval_s <= 0:
+                interval_s = 3600
+            windows = {}
             try:
-                derived_seconds = int(derived_seconds or 0)
+                raw = schedule_row.get("windows")
+                if raw:
+                    windows = json.loads(raw) if isinstance(raw, str) else (raw if isinstance(raw, dict) else {})
             except Exception:
-                derived_seconds = 0
-            if derived_seconds <= 0:
-                # fall back to Schedule default intervalSeconds
-                derived_seconds = int(getattr(Schedule, "__dataclass_fields__", {}).get("intervalSeconds").default) if hasattr(Schedule, "__dataclass_fields__") else 3600
-
+                windows = {}
             j.schedule = Schedule(
                 enabled=bool(schedule_row.get("enabled", 1)),
-                intervalSeconds=int(derived_seconds),
-                everyMinutes=int(schedule_row.get("everyMinutes", 60) or 60),
+                intervalSeconds=int(interval_s),
                 windows=windows,
-                nextRunAt=schedule_row.get("nextRunAt"),
-                lastScheduledRunAt=schedule_row.get("lastScheduledRunAt"),
             )
         else:
-            # Use Schedule dataclass defaults (enabled/intervalSeconds/everyMinutes) when no DB row exists.
-            j.schedule = Schedule(windows={})
+            j.schedule = Schedule()
 
         return j
 
@@ -609,12 +611,7 @@ class Job:
             "conflictPolicy": self.conflictPolicy,
             "sourceEndpoint": {"type": self.sourceEndpoint.type, "location": self.sourceEndpoint.location, "auth": dict(self.sourceEndpoint.auth)},
             "targetEndpoint": {"type": self.targetEndpoint.type, "location": self.targetEndpoint.location, "auth": dict(self.targetEndpoint.auth)},
-            "schedule": {
-                "enabled": self.schedule.enabled,
-                "intervalSeconds": self.schedule.interval_seconds(),
-                "everyMinutes": self.schedule.everyMinutes,
-                "windows": self.schedule.windows,
-            },
+            "schedule": self.schedule.to_dict() if self.schedule else {"enabled": True, "intervalSeconds": 3600, "windows": {}},
             "lastRun": self.lastRun,
             "lastResult": self.lastResult,
             "lastError": self.lastError,
@@ -812,17 +809,14 @@ class JobStore:
             s_data = {
                 "jobId": job_id,
                 "enabled": int(schedule_row.get("enabled") or 0),
-                "everyMinutes": int(schedule_row.get("everyMinutes") or 1),
                 "intervalSeconds": int(schedule_row.get("intervalSeconds") or 0),
-                "nextRunAt": schedule_row.get("nextRunAt"),
-                "lastScheduledRunAt": schedule_row.get("lastScheduledRunAt"),
                 "windows": schedule_row.get("windows"),
             }
             self._upsert(
                 "schedule",
                 s_data,
                 ["jobId"],
-                update_columns=["enabled", "everyMinutes", "intervalSeconds", "nextRunAt", "lastScheduledRunAt", "windows"],
+                update_columns=["enabled", "intervalSeconds", "windows"],
             )
 
         return int(job.id or 0)

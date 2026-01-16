@@ -667,7 +667,7 @@ class ScheduleDialog(QDialog):
     Persists as:
       schedule = {
         "enabled": bool,
-        "intervalSeconds": int,   # global default/fallback
+        "intervalSeconds": int,   # computed fallback (minimum per-day interval if enabled, else default)
         "windows": {
           "0":[{"start":"22:00","end":"06:00","intervalSeconds":3600}],
           ...
@@ -707,12 +707,6 @@ class ScheduleDialog(QDialog):
             for wd in range(7):
                 schedule["windows"][str(wd)] = [{"start": "00:00", "end": "23:59", "intervalSeconds": int(self._default_interval_seconds)}]
         else:
-            # Backward compatibility: everyMinutes -> intervalSeconds
-            if "intervalSeconds" not in schedule:
-                try:
-                    schedule["intervalSeconds"] = int(schedule.get("everyMinutes", 60) or 60) * 60
-                except Exception:
-                    schedule["intervalSeconds"] = int(self._default_interval_seconds)
             # Ensure windows exists; if missing, default to every day all day
             if not isinstance(schedule.get("windows"), dict) or not schedule.get("windows"):
                 schedule["windows"] = {}
@@ -739,12 +733,7 @@ class ScheduleDialog(QDialog):
         self.enabled = QCheckBox()
         self.enabled.setChecked(bool(schedule.get("enabled", False)))
 
-        self.interval_seconds = QSpinBox()
-        self.interval_seconds.setRange(1, 604800)  # 1s .. 7 days
-        self.interval_seconds.setValue(int(schedule.get("intervalSeconds", self._default_interval_seconds) or self._default_interval_seconds))
-
         form.addRow("Enabled", self.enabled)
-        form.addRow("Interval (in seconds)", self.interval_seconds)
 
         # Windows editor
         win_frame = QFrame()
@@ -837,7 +826,6 @@ class ScheduleDialog(QDialog):
 
     def _sync_enabled_state(self):
         en = self.enabled.isChecked()
-        self.interval_seconds.setEnabled(en)
         for wd, ctrls in self._day_controls.items():
             ctrls["enabled"].setEnabled(en)
             # if schedule disabled, visually disable time edits too
@@ -866,10 +854,6 @@ class ScheduleDialog(QDialog):
             return default
 
     def _on_ok(self):
-        if self.enabled.isChecked() and self.interval_seconds.value() < 1:
-            MsgBox.show(self, "Schedule", "Interval (in seconds) must be at least 1 if enabled.", icon="warning")
-            return
-
         if self.enabled.isChecked():
             for _wd, ctrls in self._day_controls.items():
                 if not ctrls["enabled"].isChecked():
@@ -884,7 +868,7 @@ class ScheduleDialog(QDialog):
 
     def value(self) -> Dict[str, Any]:
         windows: Dict[str, Any] = {}
-
+        enabled_intervals = []
         if self.enabled.isChecked():
             for wd, ctrls in self._day_controls.items():
                 if not ctrls["enabled"].isChecked():
@@ -893,11 +877,16 @@ class ScheduleDialog(QDialog):
                 e = ctrls["end"].time().toString("HH:mm")
                 itv = int(ctrls["interval"].value())
                 windows[str(wd)] = [{"start": s, "end": e, "intervalSeconds": itv}]
+                enabled_intervals.append(itv)
+
+        # Compute fallback intervalSeconds: min per-day interval if enabled, else default
+        if self.enabled.isChecked() and enabled_intervals:
+            computed_interval_seconds = min(enabled_intervals)
+        else:
+            computed_interval_seconds = int(self._default_interval_seconds)
 
         return {
             "enabled": bool(self.enabled.isChecked()),
-            "intervalSeconds": int(self.interval_seconds.value()),
-            # Backward compatibility (old key) for any older code paths:
-            "everyMinutes": max(1, int(int(self.interval_seconds.value()) // 60)),
+            "intervalSeconds": int(computed_interval_seconds),
             "windows": windows,
         }
