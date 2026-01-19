@@ -51,6 +51,60 @@ except ImportError:
 class Replicator(QMainWindow):
 
     # ------------------------------------------------------------------
+    # Initialization
+    # ------------------------------------------------------------------
+
+    def __init__(
+        self,
+        helper: Optional[Helper] = None,
+        configuration: Optional[Configuration] = None,
+        logger: Optional[Log] = None,
+    ):
+        super().__init__()
+
+        self._app = QApplication.instance()
+        if self._app is None:
+            raise RuntimeError("Replicator must be created after QApplication/Application.")
+
+        helper = helper or getattr(self._app, "helper", None)
+        configuration = configuration or getattr(self._app, "configuration", None)
+        logger = logger or getattr(self._app, "logger", None)
+
+        if helper is None or configuration is None:
+            raise RuntimeError("Replicator requires corePY Helper + Configuration.")
+
+        self._helper: Helper = helper
+        self._configuration: Configuration = configuration
+        self._logger: Optional[Log] = logger
+
+        self._fs = FileSystem(helper=self._helper, logger=self._logger)
+
+        # --- Database path setup ---
+        # Use Helper.get_cwd() if present, else os.getcwd()
+        if hasattr(self._helper, "get_cwd") and callable(getattr(self._helper, "get_cwd", None)):
+            base_dir = self._helper.get_cwd()
+        else:
+            base_dir = os.getcwd()
+        data_dir = os.path.join(base_dir, "data")
+        db_path = os.path.join(data_dir, "replicator.db")
+
+        # --- Database (corePY SQLite wrapper) + migrations ---
+        self._db = SQLite(db_path=db_path)
+        self._migration = Migration(self._db, logger=self._logger)
+        self._migration.ensure()
+
+        self._store = JobStore(self._db)
+
+        self._log(f"[Replicator] Database: {db_path}", level="debug")
+        self._log("[Replicator] Database migrations applied.", level="info")
+
+        # Domain jobs (Job objects)
+        self._jobs: List[Job] = []
+        self._table: Optional[QTableWidget] = None
+
+        # After DB is ready, log a snapshot of DB layout/counts (non-verbose)
+        self._db_debug_snapshot(verbose=False)
+
     # ------------------------------------------------------------------
     # Scheduler (service mode)
     # ------------------------------------------------------------------
@@ -643,60 +697,6 @@ class Replicator(QMainWindow):
                 pass
 
         return True, stats
-    """
-    Replicator UI + CLI entrypoint.
-    Jobs are stored in SQLite database (see ReplicatorDB).
-    """
-    def __init__(
-        self,
-        helper: Optional[Helper] = None,
-        configuration: Optional[Configuration] = None,
-        logger: Optional[Log] = None,
-    ):
-        super().__init__()
-
-        self._app = QApplication.instance()
-        if self._app is None:
-            raise RuntimeError("Replicator must be created after QApplication/Application.")
-
-        helper = helper or getattr(self._app, "helper", None)
-        configuration = configuration or getattr(self._app, "configuration", None)
-        logger = logger or getattr(self._app, "logger", None)
-
-        if helper is None or configuration is None:
-            raise RuntimeError("Replicator requires corePY Helper + Configuration.")
-
-        self._helper: Helper = helper
-        self._configuration: Configuration = configuration
-        self._logger: Optional[Log] = logger
-
-        self._fs = FileSystem(helper=self._helper, logger=self._logger)
-
-        # --- Database path setup ---
-        # Use Helper.get_cwd() if present, else os.getcwd()
-        if hasattr(self._helper, "get_cwd") and callable(getattr(self._helper, "get_cwd", None)):
-            base_dir = self._helper.get_cwd()
-        else:
-            base_dir = os.getcwd()
-        data_dir = os.path.join(base_dir, "data")
-        db_path = os.path.join(data_dir, "replicator.db")
-
-        # --- Database (corePY SQLite wrapper) + migrations ---
-        self._db = SQLite(db_path=db_path)
-        self._migration = Migration(self._db, logger=self._logger)
-        self._migration.ensure()
-
-        self._store = JobStore(self._db)
-
-        self._log(f"[Replicator] Database: {db_path}", level="debug")
-        self._log("[Replicator] Database migrations applied.", level="info")
-
-        # Domain jobs (Job objects)
-        self._jobs: List[Job] = []
-        self._table: Optional[QTableWidget] = None
-
-        # After DB is ready, log a snapshot of DB layout/counts (non-verbose)
-        self._db_debug_snapshot(verbose=False)
 
     # ------------------------------------------------------------------
     # CLI integration
@@ -738,15 +738,23 @@ class Replicator(QMainWindow):
         # Use app icon/logo if you have one; otherwise harmless
         # Adjust path to wherever you store icons in Replicator
         candidate = self._helper.get_path("icons/icon.png") or self._helper.get_path("core/icons/info.svg")
+        name = getattr(self._app, "name", None) or self._app.applicationName()
         if candidate and self._helper.file_exists(candidate) and candidate.lower().endswith(".png"):
             pm = QPixmap(candidate)
             if not pm.isNull():
                 logo.setPixmap(pm.scaled(256, 256, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         else:
-            logo.setText("Replicator")
-            logo.setStyleSheet("font-size: 22px; font-weight: 600;")
+            logo.setText(name)
+            logo.setStyleSheet("font-size: 32px; font-weight: 200; opacity: 0.8; padding: 0px; margin: 0px;")
 
         root.addWidget(logo)
+
+        # Application name (under logo)
+        app_name = QLabel()
+        app_name.setText(str(name) if name else "")
+        app_name.setAlignment(Qt.AlignCenter)
+        app_name.setStyleSheet("font-size: 32px; font-weight: 200; opacity: 0.8; padding: 0px; margin: 0px;")
+        root.addWidget(app_name)
 
         # --- Actions row (top, after logo) ---
         actions_row = QHBoxLayout()
