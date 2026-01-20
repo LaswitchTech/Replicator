@@ -161,7 +161,6 @@ def _mount_endpoint_if_remote(
         username=auth.get("username"),
         password=auth.get("password"),
         domain=auth.get("domain") or auth.get("workgroup"),
-        private_key=auth.get("sshKey") or auth.get("private_key"),
     )
 
     # Parse host and remote from location (SMB only)

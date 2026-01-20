@@ -31,9 +31,9 @@ Contributions to Replicator are welcome! If you have ideas for new features or h
 
 ## To Do
   - ~~**Support for Local**: Add support for Local filesystems.~~
-  - **Support for SMB**: Add support for SMB Shares.
-  - **Support for FTP**: Add support for FTP Shares.
-  - **Support for SSHFS**: Add support for SSH filesystems.
+  - ~~**Support for SMB**: Add support for SMB Shares.~~
+  - ~~**Support for FTP**: Add support for FTP Shares.~~ --- REMOVED ---
+  - ~~**Support for SSHFS**: Add support for SSH filesystems.~~ --- REMOVED ---
   - ~~**Mode Mirror**: Add replication mode Mirror.~~
   - **Mode Incremental**: Add replication mode Incremental.
   - ~~**Direction**: Add replication direction (One way, Two way).~~

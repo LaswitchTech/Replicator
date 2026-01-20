@@ -160,7 +160,6 @@ def _mount_endpoint_if_remote(
             password=str(auth_in.get("password") or ""),
             domain=str(auth_in.get("domain") or ""),
             port=int(auth_in.get("port") or 445) or None,
-            private_key=str(auth_in.get("key") or ""),
             guest=bool(auth_in.get("guest", True)),
         )
     except Exception:
