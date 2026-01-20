@@ -5,9 +5,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone, time
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple, Union
 import json
 import sqlite3
+
+import tempfile
+import time
+import shutil
+import subprocess
+from pathlib import Path
+from urllib.parse import urlparse
+
+import os
+import sys
+import platform
 
 try:
     # corePY SQLite wrapper (preferred)
@@ -16,7 +27,278 @@ except Exception:  # pragma: no cover
     SQLite = None  # type: ignore
 
 
+
 JsonDict = Dict[str, Any]
+
+
+# ---------------------------------------------------------------------------
+# Remote endpoints (rclone mount)
+# ---------------------------------------------------------------------------
+
+class RemoteMountError(RuntimeError):
+    pass
+
+
+def _is_windows() -> bool:
+    return (os.name == "nt")
+
+
+def _find_rclone() -> str:
+    """Resolve rclone from PATH or bundled src/bin layout."""
+    exe = "rclone.exe" if _is_windows() else "rclone"
+
+    p = shutil.which(exe)
+    if p:
+        return p
+
+    # Bundled layout expected by corePY-style projects:
+    #   src/bin/rclone/[os]/[arch]/bin/rclone
+    here = Path(__file__).resolve()
+    os_name = "windows" if _is_windows() else ("macos" if sys.platform == "darwin" else "linux")
+
+    mach = (platform.machine() or "").lower()
+    if mach in {"x86_64", "amd64"}:
+        arch = "x86_64"
+    elif mach in {"aarch64", "arm64"}:
+        arch = "arm64"
+    elif mach.startswith("arm"):
+        arch = "arm"
+    elif mach in {"i386", "i686", "x86"}:
+        arch = "x86"
+    else:
+        arch = mach or "unknown"
+
+    for parent in [here.parent] + list(here.parents):
+        candidate = parent / "src" / "bin" / "rclone" / os_name / arch / "bin" / exe
+        if candidate.exists() and candidate.is_file():
+            return str(candidate)
+
+    raise RemoteMountError("rclone not found (not in PATH and not bundled under src/bin/rclone).")
+
+
+def _rclone_escape(val: str) -> str:
+    # Escape separators used by rclone on-the-fly remotes.
+    return str(val).replace("\\", "\\\\").replace(",", "\\,").replace(":", "\\:")
+
+
+def _parse_smb_location(location: str) -> Tuple[str, str, str]:
+    """Return (host, share, subpath) from location.
+
+    Accepts forms:
+      - //host/share/subpath
+      - \\host\\share\\subpath
+      - host/share/subpath
+    """
+    loc = (location or "").strip()
+    loc = loc.replace("\\", "/")
+    loc = loc.lstrip("/")
+    parts = [p for p in loc.split("/") if p]
+    if len(parts) < 2:
+        raise RemoteMountError("SMB location must include host and share (e.g. //server/Share[/path]).")
+    host = parts[0]
+    share = parts[1]
+    subpath = "/".join(parts[2:]) if len(parts) > 2 else ""
+    return host, share, subpath
+
+
+def _parse_host_path_location(location: str, default_scheme: str) -> Tuple[str, str, Optional[str]]:
+    """Parse host/path from either URL form or host:/path.
+
+    Returns (host, path, user_from_location).
+
+    Accepts:
+      - ftp://host/path
+      - sftp://user@host:22/path
+      - user@host:/path
+      - host:/path
+    """
+    loc = (location or "").strip()
+
+    # URL form
+    if "://" in loc:
+        u = urlparse(loc)
+        host = u.hostname or ""
+        path = u.path or "/"
+        user = u.username
+        if not host:
+            raise RemoteMountError(f"Invalid {default_scheme} URL (missing host): {location}")
+        return host, path, user
+
+    # scp-ish form
+    if ":" in loc:
+        left, right = loc.split(":", 1)
+        user = None
+        host = left
+        if "@" in left:
+            user, host = left.split("@", 1)
+        path = right if right.startswith("/") else ("/" + right)
+        if not host:
+            raise RemoteMountError(f"Invalid {default_scheme} location (missing host): {location}")
+        return host, path, user
+
+    raise RemoteMountError(
+        f"Invalid {default_scheme} location. Use host:/path or {default_scheme}://host/path (got: {location})"
+    )
+
+
+def _build_rclone_remote(endpoint: "Endpoint") -> Tuple[str, str]:
+    """Return (remote_def, mount_subpath_description).
+
+    mount_subpath_description is informational and currently unused.
+    """
+    t = (endpoint.type or "local").lower()
+    auth = dict(endpoint.auth or {})
+
+    if t == "smb":
+        host, share, subpath = _parse_smb_location(endpoint.location)
+        params: Dict[str, str] = {
+            "host": host,
+            "share": share,
+        }
+        # Optional path within share
+        if subpath:
+            params["path"] = subpath
+
+        # Credentials
+        username = str(auth.get("username") or "")
+        password = str(auth.get("password") or "")
+        domain = str(auth.get("domain") or "")
+        guest = bool(auth.get("guest", True))
+
+        if not guest and username:
+            params["user"] = username
+        if not guest and password:
+            params["pass"] = password
+        if domain:
+            params["domain"] = domain
+
+        remote = ":smb," + ",".join(f"{k}={_rclone_escape(v)}" for k, v in params.items()) + ":"
+        return remote, subpath
+
+    if t == "ftp":
+        host, path, user_from_loc = _parse_host_path_location(endpoint.location, "ftp")
+        params = {
+            "host": host,
+            "path": path,
+        }
+        try:
+            params["port"] = str(int(auth.get("port", 21)))
+        except Exception:
+            params["port"] = "21"
+
+        username = str(auth.get("username") or user_from_loc or "")
+        password = str(auth.get("password") or "")
+        guest = bool(auth.get("guest", False))
+        if not guest and username:
+            params["user"] = username
+        if not guest and password:
+            params["pass"] = password
+
+        remote = ":ftp," + ",".join(f"{k}={_rclone_escape(v)}" for k, v in params.items()) + ":"
+        return remote, path
+
+    if t == "ssh":
+        host, path, user_from_loc = _parse_host_path_location(endpoint.location, "sftp")
+        params = {
+            "host": host,
+            "path": path,
+        }
+        try:
+            params["port"] = str(int(auth.get("port", 22)))
+        except Exception:
+            params["port"] = "22"
+
+        username = str(auth.get("username") or user_from_loc or "")
+        password = str(auth.get("password") or "")
+        use_key = bool(auth.get("useKey", False))
+        key_path = str(auth.get("key") or "")
+
+        if username:
+            params["user"] = username
+        if (not use_key) and password:
+            params["pass"] = password
+        if use_key and key_path:
+            # rclone sftp backend uses key_file
+            params["key_file"] = key_path
+
+        remote = ":sftp," + ",".join(f"{k}={_rclone_escape(v)}" for k, v in params.items()) + ":"
+        return remote, path
+
+    raise RemoteMountError(f"Unsupported remote endpoint type for mount: {endpoint.type}")
+
+
+from dataclasses import dataclass
+
+@dataclass
+class _MountedEndpoint:
+    local_path: str
+    mount_point: Optional[str] = None
+    proc: Optional[subprocess.Popen] = None
+
+    def cleanup(self) -> None:
+        if self.mount_point:
+            try:
+                rclone = _find_rclone()
+                subprocess.run([rclone, "unmount", self.mount_point], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            except Exception:
+                pass
+        if self.proc:
+            try:
+                self.proc.terminate()
+            except Exception:
+                pass
+
+
+def _mount_endpoint_if_remote(endpoint: "Endpoint", job_id: Union[int, None], role: str) -> _MountedEndpoint:
+    """If endpoint is remote (smb/ftp/ssh), mount it and return local path; otherwise return local location."""
+    t = (endpoint.type or "local").lower()
+    if t == "local":
+        return _MountedEndpoint(local_path=endpoint.location)
+
+    if t not in ("smb", "ftp", "ssh"):
+        raise RemoteMountError(f"Unsupported endpoint type: {t}")
+
+    rclone = _find_rclone()
+    remote_def, _ = _build_rclone_remote(endpoint)
+
+    # Mount under a stable temp folder for the job
+    base = Path(tempfile.gettempdir()) / "replicator" / "mounts" / (str(job_id or "new")) / role
+    base.mkdir(parents=True, exist_ok=True)
+    mount_point = str(base)
+
+    cmd: List[str] = [rclone, "mount", remote_def, mount_point]
+
+    # Best-effort background on Unix. On Windows, we keep it in a subprocess.
+    if not _is_windows():
+        cmd += ["--daemon"]
+
+    # Some rclone builds may require --vfs-cache-mode for better behavior; allow user to set via auth/options
+    # If user provided extra rclone args in auth["rcloneArgs"] as a list, append them.
+    extra_args = endpoint.auth.get("rcloneArgs") if isinstance(endpoint.auth, dict) else None
+    if isinstance(extra_args, list):
+        for a in extra_args:
+            if isinstance(a, str) and a.strip():
+                cmd.append(a.strip())
+
+    proc: Optional[subprocess.Popen] = None
+    if _is_windows():
+        # Start in background; rclone mount will keep running.
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    else:
+        # With --daemon, rclone exits quickly; no need to keep a proc.
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    # Wait briefly for mount to become available.
+    deadline = time.time() + 10.0
+    while time.time() < deadline:
+        try:
+            if os.path.isdir(mount_point) and (os.path.ismount(mount_point) or os.listdir(mount_point) is not None):
+                break
+        except Exception:
+            pass
+        time.sleep(0.25)
+
+    return _MountedEndpoint(local_path=mount_point, mount_point=mount_point, proc=proc)
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +353,12 @@ class Endpoint:
                     port = int(auth.get("port", 21))
                 except Exception:
                     port = 21
+            # Optional SMB domain
+            if t == "smb":
+                options["domain"] = auth.get("domain")
+            # Optional rclone args (applies to all remote types)
+            if isinstance(auth.get("rcloneArgs"), list):
+                options["rcloneArgs"] = auth.get("rcloneArgs")
         elif t == "ssh":
             useKey = 1 if bool(auth.get("useKey", False)) else 0
             username = auth.get("username") or None
@@ -80,6 +368,8 @@ class Endpoint:
             except Exception:
                 port = 22
             sshKey = auth.get("key") or None
+            if isinstance(auth.get("rcloneArgs"), list):
+                options["rcloneArgs"] = auth.get("rcloneArgs")
 
         known_keys = {"guest", "username", "password", "port", "useKey", "key"}
         for k, v in auth.items():
@@ -114,6 +404,9 @@ class Endpoint:
             }
             if t == "ftp":
                 auth["port"] = row.get("port") or 21
+            if t == "smb":
+                # domain is stored in options JSON when present
+                pass
         elif t == "ssh":
             auth = {
                 "useKey": bool(row.get("useKey", 0)),
@@ -460,10 +753,18 @@ class Job:
                 stats={},
             )
 
-        src = self.sourceEndpoint.location
-        dst = self.targetEndpoint.location
         preserve = bool(self.preserveMetadata)
         allow_del = bool(self.allowDeletion)
+
+        # Resolve endpoints (mount remote endpoints to local paths via rclone)
+        mounted: List[_MountedEndpoint] = []
+        src_m = _mount_endpoint_if_remote(self.sourceEndpoint, self.id, "source")
+        mounted.append(src_m)
+        dst_m = _mount_endpoint_if_remote(self.targetEndpoint, self.id, "target")
+        mounted.append(dst_m)
+
+        src = src_m.local_path
+        dst = dst_m.local_path
 
         ok: bool = False
         stats: JsonDict = {}
@@ -487,6 +788,13 @@ class Job:
             ok = False
             self.lastError = str(e)
             _log(f"[Job] Execution failed: {e}", "error")
+        finally:
+            # Always unmount remote endpoints
+            for m in reversed(mounted):
+                try:
+                    m.cleanup()
+                except Exception:
+                    pass
 
         ended_at = datetime.now(timezone.utc).isoformat()
         self.lastRun = ended_at
