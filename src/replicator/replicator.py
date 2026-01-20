@@ -8,13 +8,9 @@ from typing import Optional, Any, Dict, List
 import os
 import json
 import shutil
-import sys
-import platform
 import tempfile
 import time
-import subprocess
 from pathlib import Path
-from urllib.parse import urlparse
 
 # Add datetime import for lastRun/lastResult
 from datetime import datetime, timezone, timedelta
@@ -45,6 +41,7 @@ try:
     from core.log import Log
     from core.ui import MsgBox, Form
     from core.filesystem.filesystem import FileSystem
+    from core.filesystem.share import Share, ShareAuth
     from core.database.sqlite import SQLite
 except ImportError:
     from helper import Helper
@@ -52,260 +49,216 @@ except ImportError:
     from log import Log
     from ui import MsgBox, Form
     from filesystem.filesystem import FileSystem
+    from filesystem.share import Share, ShareAuth
     from database.sqlite import SQLite
 
 
+
 # ---------------------------------------------------------------------------
-# Remote endpoints (rclone mount)
+# Remote endpoints (Share mount)
 # ---------------------------------------------------------------------------
 
 class RemoteMountError(RuntimeError):
     pass
 
 
-def _is_windows() -> bool:
-    return os.name == "nt"
+class _ShareLogger:
+    """Adapter that forwards Share logs into Replicator's logger."""
 
+    def __init__(self, append_fn):
+        self._append = append_fn
 
-def _find_rclone() -> str:
-    """Resolve rclone from PATH or bundled src/bin layout."""
-    exe = "rclone.exe" if _is_windows() else "rclone"
+    def debug(self, msg: str) -> None:
+        self._append(f"[Share] {msg}", level="debug")
 
-    p = shutil.which(exe)
-    if p:
-        return p
+    def info(self, msg: str) -> None:
+        self._append(f"[Share] {msg}", level="info")
 
-    here = Path(__file__).resolve()
-    os_name = "windows" if _is_windows() else ("macos" if sys.platform == "darwin" else "linux")
+    def warning(self, msg: str) -> None:
+        self._append(f"[Share] {msg}", level="warning")
 
-    mach = (platform.machine() or "").lower()
-    if mach in {"x86_64", "amd64"}:
-        arch = "x86_64"
-    elif mach in {"aarch64", "arm64"}:
-        arch = "arm64"
-    elif mach.startswith("arm"):
-        arch = "arm"
-    elif mach in {"i386", "i686", "x86"}:
-        arch = "x86"
-    else:
-        arch = mach or "unknown"
-
-    for parent in [here.parent] + list(here.parents):
-        candidate = parent / "src" / "bin" / "rclone" / os_name / arch / "bin" / exe
-        if candidate.exists() and candidate.is_file():
-            return str(candidate)
-
-    raise RemoteMountError("rclone not found (not in PATH and not bundled under src/bin/rclone).")
-
-
-def _rclone_escape(val: str) -> str:
-    return str(val).replace("\\", "\\\\").replace(",", "\\,").replace(":", "\\:")
-
-
-def _parse_smb_location(location: str) -> tuple[str, str, str]:
-    """Return (host, share, subpath) from location.
-
-    Accepts forms:
-      - //host/share/subpath
-      - \\host\\share\\subpath
-      - host/share/subpath
-    """
-    loc = (location or "").strip().replace("\\", "/")
-    loc = loc.lstrip("/")
-    parts = [p for p in loc.split("/") if p]
-    if len(parts) < 2:
-        raise RemoteMountError("SMB location must include host and share (e.g. //server/Share[/path]).")
-    host = parts[0]
-    share = parts[1]
-    subpath = "/".join(parts[2:]) if len(parts) > 2 else ""
-    return host, share, subpath
-
-
-def _parse_host_path_location(location: str, default_scheme: str) -> tuple[str, str, str | None]:
-    """Parse host/path from either URL form or host:/path.
-
-    Returns (host, path, user_from_location).
-
-    Accepts:
-      - ftp://host/path
-      - sftp://user@host:22/path
-      - user@host:/path
-      - host:/path
-    """
-    loc = (location or "").strip()
-
-    if "://" in loc:
-        u = urlparse(loc)
-        host = u.hostname or ""
-        path = u.path or "/"
-        user = u.username
-        if not host:
-            raise RemoteMountError(f"Invalid {default_scheme} URL (missing host): {location}")
-        return host, path, user
-
-    if ":" in loc:
-        left, right = loc.split(":", 1)
-        user = None
-        host = left
-        if "@" in left:
-            user, host = left.split("@", 1)
-        path = right if right.startswith("/") else ("/" + right)
-        if not host:
-            raise RemoteMountError(f"Invalid {default_scheme} location (missing host): {location}")
-        return host, path, user
-
-    raise RemoteMountError(
-        f"Invalid {default_scheme} location. Use host:/path or {default_scheme}://host/path (got: {location})"
-    )
-
-
-def _build_rclone_remote(endpoint: dict[str, Any]) -> str:
-    """Build an on-the-fly rclone remote definition for mount."""
-    t = (endpoint.get("type") or "local").lower()
-    loc = str(endpoint.get("location") or "")
-    auth = endpoint.get("auth") or {}
-    if not isinstance(auth, dict):
-        auth = {}
-
-    if t == "smb":
-        host, share, subpath = _parse_smb_location(loc)
-        params: dict[str, str] = {"host": host, "share": share}
-        if subpath:
-            params["path"] = subpath
-
-        guest = bool(auth.get("guest", True))
-        username = str(auth.get("username") or "")
-        password = str(auth.get("password") or "")
-        domain = str(auth.get("domain") or "")
-
-        if not guest and username:
-            params["user"] = username
-        if not guest and password:
-            params["pass"] = password
-        if domain:
-            params["domain"] = domain
-
-        return ":smb," + ",".join(f"{k}={_rclone_escape(v)}" for k, v in params.items()) + ":"
-
-    if t == "ftp":
-        host, path, user_from_loc = _parse_host_path_location(loc, "ftp")
-        params = {"host": host, "path": path}
-        try:
-            params["port"] = str(int(auth.get("port", endpoint.get("port") or 21)))
-        except Exception:
-            params["port"] = "21"
-
-        guest = bool(auth.get("guest", False))
-        username = str(auth.get("username") or user_from_loc or "")
-        password = str(auth.get("password") or "")
-        if not guest and username:
-            params["user"] = username
-        if not guest and password:
-            params["pass"] = password
-
-        return ":ftp," + ",".join(f"{k}={_rclone_escape(v)}" for k, v in params.items()) + ":"
-
-    if t == "ssh":
-        host, path, user_from_loc = _parse_host_path_location(loc, "sftp")
-        params = {"host": host, "path": path}
-        try:
-            params["port"] = str(int(auth.get("port", endpoint.get("port") or 22)))
-        except Exception:
-            params["port"] = "22"
-
-        username = str(auth.get("username") or user_from_loc or "")
-        password = str(auth.get("password") or "")
-        use_key = bool(auth.get("useKey", False))
-        key_path = str(auth.get("key") or auth.get("sshKey") or "")
-
-        if username:
-            params["user"] = username
-        if (not use_key) and password:
-            params["pass"] = password
-        if use_key and key_path:
-            params["key_file"] = key_path
-
-        return ":sftp," + ",".join(f"{k}={_rclone_escape(v)}" for k, v in params.items()) + ":"
-
-    raise RemoteMountError(f"Unsupported remote endpoint type: {t}")
+    def error(self, msg: str) -> None:
+        self._append(f"[Share] {msg}", level="error")
 
 
 class _MountedEndpoint:
-    def __init__(self, local_path: str, mount_point: str | None = None, proc: subprocess.Popen | None = None):
+    def __init__(self, local_path: str, mount_point: str | None = None, share: Share | None = None):
         self.local_path = local_path
         self.mount_point = mount_point
-        self.proc = proc
+        self.share = share
 
     def cleanup(self) -> None:
-        if self.mount_point:
+        if self.share is not None and self.mount_point:
             try:
-                rclone = _find_rclone()
-                subprocess.run([rclone, "unmount", self.mount_point], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            except Exception:
-                pass
-        if self.proc:
-            try:
-                self.proc.terminate()
+                self.share.umount(self.mount_point, elevate=False)
             except Exception:
                 pass
 
 
-def _mount_endpoint_if_remote(endpoint: dict[str, Any], job_id: int | None, role: str, logger: Any = None) -> _MountedEndpoint:
+
+# --- Location parsing helpers for remote endpoints ---
+
+def _parse_smb_location(loc: str) -> tuple[str, str]:
+    """Parse SMB location into (host, remote).
+
+    Accepts forms:
+      - \\host\Share
+      - \\host\Share\dir\sub
+      - //host/Share/dir
+      - host/Share/dir
+    Returns:
+      host, remote where remote is "Share" or "Share/dir/sub".
+    """
+    s = (loc or "").strip()
+    s = s.replace("/", "\\")
+    while s.startswith("\\"):
+        s = s[1:]
+    parts = [p for p in s.split("\\") if p]
+    if len(parts) < 2:
+        raise RemoteMountError(f"Invalid SMB location: {loc}")
+    host = parts[0]
+    remote = "/".join(parts[1:])
+    return host, remote
+
+
+def _parse_host_path_location(loc: str) -> tuple[str, str]:
+    """Parse ssh/ftp-ish location into (host, remote_path).
+
+    Accepts forms:
+      - user@host:/path/to/dir
+      - host:/path/to/dir
+      - host/path/to/dir
+      - sftp://user@host/path (user is ignored here; auth provides it)
+      - ftp://user@host/path
+
+    Returns:
+      host, remote_path (remote_path always starts with '/')
+    """
+    s = (loc or "").strip()
+    if not s:
+        raise RemoteMountError("Empty location")
+
+    # Strip scheme if present
+    if "://" in s:
+        try:
+            scheme, rest = s.split("://", 1)
+            s = rest
+        except Exception:
+            pass
+
+    # Drop user@ if provided (auth should carry username)
+    if "@" in s and not s.startswith("["):
+        # user@host:... or user@host/...
+        s = s.split("@", 1)[1]
+
+    host = ""
+    path = ""
+
+    if ":" in s:
+        host, path = s.split(":", 1)
+    elif "/" in s:
+        host, path = s.split("/", 1)
+        path = "/" + path
+    else:
+        host, path = s, "/"
+
+    host = host.strip()
+    path = (path or "/").strip()
+    if not path.startswith("/"):
+        path = "/" + path
+
+    if not host:
+        raise RemoteMountError(f"Invalid location: {loc}")
+
+    return host, path
+
+
+def _mount_endpoint_if_remote(
+    endpoint: dict[str, Any],
+    job_id: int | None,
+    role: str,
+    *,
+    share: Share,
+    log_append,
+) -> _MountedEndpoint:
+    """Mount SMB/FTP/SSH endpoints using Share and return a local path usable by the sync engine."""
+
     t = (endpoint.get("type") or "local").lower()
     loc = str(endpoint.get("location") or "").strip()
+
     if t == "local":
         return _MountedEndpoint(local_path=loc)
 
     if t not in ("smb", "ftp", "ssh"):
         raise RemoteMountError(f"Unsupported endpoint type: {t}")
 
-    rclone = _find_rclone()
-    remote_def = _build_rclone_remote(endpoint)
-
     base = Path(tempfile.gettempdir()) / "replicator" / "mounts" / (str(job_id or "new")) / role
     base.mkdir(parents=True, exist_ok=True)
     mount_point = str(base)
 
-    cmd: list[str] = [rclone, "mount", remote_def, mount_point]
+    # Build auth/options payload (do NOT log secrets)
+    auth: dict[str, Any] = {}
+    if isinstance(endpoint.get("auth"), dict):
+        auth.update(endpoint.get("auth") or {})
 
-    # On macOS/Linux, daemonize
-    if not _is_windows():
-        cmd += ["--daemon"]
+    # Backward-compatible: endpoints table columns may be stored at top-level
+    for k in ("port", "guest", "username", "password", "useKey", "sshKey", "options"):
+        if k in endpoint and endpoint.get(k) is not None and k not in auth:
+            auth[k] = endpoint.get(k)
 
-    extra_args = None
-    auth = endpoint.get("auth")
-    if isinstance(auth, dict):
-        extra_args = auth.get("rcloneArgs")
-    if isinstance(extra_args, list):
-        for a in extra_args:
-            if isinstance(a, str) and a.strip():
-                cmd.append(a.strip())
+    # Build ShareAuth object
+    share_auth = ShareAuth(
+        username=auth.get("username"),
+        password=auth.get("password"),
+        domain=auth.get("domain") or auth.get("workgroup"),
+        private_key=auth.get("sshKey") or auth.get("private_key"),
+    )
 
-    if logger is not None and hasattr(logger, "append"):
-        try:
-            logger.append("[Replicator][rclone] " + " ".join(cmd), level="debug", channel="replicator")
-        except Exception:
-            pass
-
-    proc: subprocess.Popen | None = None
-    if _is_windows():
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    # Parse host and remote from location
+    if t == "smb":
+        host, remote = _parse_smb_location(loc)
+    elif t in ("ftp", "ssh"):
+        host, remote = _parse_host_path_location(loc)
     else:
-        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        raise RemoteMountError(f"Unsupported endpoint type: {t}")
 
-    # Wait briefly for mount directory to become usable
-    deadline = time.time() + 10.0
-    while time.time() < deadline:
-        try:
-            if os.path.isdir(mount_point):
-                # os.path.ismount can be unreliable on macOS FUSE; accept directory existence.
-                break
-        except Exception:
-            pass
-        time.sleep(0.25)
+    # Determine port and options
+    port = None
+    try:
+        if auth.get("port") is not None:
+            port = int(auth.get("port"))
+    except Exception:
+        port = None
 
-    return _MountedEndpoint(local_path=mount_point, mount_point=mount_point, proc=proc)
+    opts = {}
+    if isinstance(auth.get("options"), dict):
+        opts.update(auth.get("options") or {})
 
+    # Emit a safe debug line (mask secrets, include host/remote)
+    safe_auth = dict(auth)
+    for k in ("password", "pass", "sshKey", "key", "key_file"):
+        if k in safe_auth and safe_auth[k]:
+            safe_auth[k] = "***"
+    log_append(
+        f"[Replicator][Share] mount protocol={t} host={host} remote={remote} mount_point={mount_point} auth={safe_auth}",
+        level="debug",
+    )
+
+    # Call Share.mount with correct signature
+    share.mount(
+        t,
+        host,
+        remote,
+        mount_point,
+        auth=share_auth,
+        port=port,
+        options=opts,
+        read_only=bool(auth.get("read_only") or auth.get("ro") or False),
+        elevate=False,
+        timeout=60,
+    )
+
+    return _MountedEndpoint(local_path=mount_point, mount_point=mount_point, share=share)
 
 
 class Replicator(QMainWindow):
@@ -1498,17 +1451,20 @@ class Replicator(QMainWindow):
         ok = False
         try:
             if str(direction).lower() == "bidirectional":
-                # Mount remote endpoints (SMB/FTP/SSH) via rclone so the bidirectional engine can
-                # operate on local paths.
+                # Mount remote endpoints (SMB/FTP/SSH) via Share so the bidirectional engine can
+                # operate on local filesystem paths AND we get proper connectivity debug logs.
                 mounted: list[_MountedEndpoint] = []
                 job_dict = job.to_legacy_dict()
 
                 src_ep = job_dict.get("sourceEndpoint") or {"type": "local", "location": src, "auth": {}}
                 dst_ep = job_dict.get("targetEndpoint") or {"type": "local", "location": dst, "auth": {}}
 
-                src_m = _mount_endpoint_if_remote(src_ep, job_id, "source", logger=self._logger)
+                share_logger = _ShareLogger(self._log)
+                share = Share(logger=share_logger)
+
+                src_m = _mount_endpoint_if_remote(src_ep, job_id, "source", share=share, log_append=self._log)
                 mounted.append(src_m)
-                dst_m = _mount_endpoint_if_remote(dst_ep, job_id, "target", logger=self._logger)
+                dst_m = _mount_endpoint_if_remote(dst_ep, job_id, "target", share=share, log_append=self._log)
                 mounted.append(dst_m)
 
                 # Local view for the bidirectional sync engine
@@ -1620,7 +1576,7 @@ class Replicator(QMainWindow):
                         self._log(f"[Replicator][DB] {t}: latest {len(rows)} row(s)", level="debug")
                         for r in rows:
                             dr = dict(r)
-                            for k in ("password", "sshKey"):
+                            for k in ("password", "pass", "sshKey", "key_file"):
                                 if k in dr and dr[k]:
                                     dr[k] = "***"
                             self._log(f"[Replicator][DB] {t}: {dr}", level="debug")
