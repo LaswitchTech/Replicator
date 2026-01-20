@@ -19,6 +19,7 @@ from urllib.parse import urlparse
 import os
 import sys
 import platform
+import re
 
 try:
     # corePY SQLite wrapper (preferred)
@@ -26,9 +27,56 @@ try:
 except Exception:  # pragma: no cover
     SQLite = None  # type: ignore
 
+try:
+    # corePY Share mount helper
+    from core.filesystem.share import Share, ShareAuth, ShareError  # type: ignore
+except Exception:  # pragma: no cover
+    Share = None  # type: ignore
+    ShareAuth = None  # type: ignore
+    ShareError = Exception  # type: ignore
+
 
 
 JsonDict = Dict[str, Any]
+
+
+# ---------------------------------------------------------------------------
+# Logging helpers (Share adapter + secret redaction)
+# ---------------------------------------------------------------------------
+
+def _redact_secrets(s: str) -> str:
+    """Redact obvious credentials from command strings/log lines."""
+    if not s:
+        return s
+    # rclone on-the-fly remote: pass=..., user=...
+    s = re.sub(r"(pass=)([^,\s]+)", r"\1***", s, flags=re.IGNORECASE)
+    # common flags
+    s = re.sub(r"(--password\s+)(\S+)", r"\1***", s, flags=re.IGNORECASE)
+    s = re.sub(r"(--pass\s+)(\S+)", r"\1***", s, flags=re.IGNORECASE)
+    return s
+
+
+class _ShareLogger:
+    """Adapter that exposes debug/info/warning/error and forwards to Job.run(logger=...)."""
+
+    def __init__(self, fn: Optional[Callable[[str, str], None]]):
+        self._fn = fn
+
+    def debug(self, msg: str) -> None:
+        if self._fn:
+            self._fn(_redact_secrets(msg), "debug")
+
+    def info(self, msg: str) -> None:
+        if self._fn:
+            self._fn(_redact_secrets(msg), "info")
+
+    def warning(self, msg: str) -> None:
+        if self._fn:
+            self._fn(_redact_secrets(msg), "warning")
+
+    def error(self, msg: str) -> None:
+        if self._fn:
+            self._fn(_redact_secrets(msg), "error")
 
 
 # ---------------------------------------------------------------------------
@@ -233,17 +281,20 @@ from dataclasses import dataclass
 class _MountedEndpoint:
     local_path: str
     mount_point: Optional[str] = None
-    proc: Optional[subprocess.Popen] = None
+    share: Any = None  # Share instance when mounted via core.filesystem.share
 
     def cleanup(self) -> None:
-        # On Windows, the mount is typically held by the running rclone process.
-        if self.proc:
+        # Prefer Share.umount when available (it performs debug probing).
+        if self.share is not None and self.mount_point:
             try:
-                self.proc.terminate()
+                self.share.umount(self.mount_point, elevate=False)
+                return
             except Exception:
+                # fall through to best-effort cleanup
                 pass
 
         if self.mount_point:
+            # Best-effort rclone unmount fallback (legacy)
             try:
                 rclone = _find_rclone()
                 subprocess.run(
@@ -257,8 +308,18 @@ class _MountedEndpoint:
                 pass
 
 
-def _mount_endpoint_if_remote(endpoint: "Endpoint", job_id: Union[int, None], role: str) -> _MountedEndpoint:
-    """If endpoint is remote (smb/ftp/ssh), mount it and return local path; otherwise return local location."""
+def _mount_endpoint_if_remote(
+    endpoint: "Endpoint",
+    job_id: Union[int, None],
+    role: str,
+    *,
+    logger: Optional[Callable[[str, str], None]] = None,
+    timeout: int = 15,
+) -> _MountedEndpoint:
+    """If endpoint is remote (smb/ftp/ssh), mount it and return local path; otherwise return local location.
+
+    Uses core.filesystem.share.Share (rclone-backed on macOS when only rclone is bundled).
+    """
     t = (endpoint.type or "local").lower()
     if t == "local":
         return _MountedEndpoint(local_path=endpoint.location)
@@ -266,82 +327,77 @@ def _mount_endpoint_if_remote(endpoint: "Endpoint", job_id: Union[int, None], ro
     if t not in ("smb", "ftp", "ssh"):
         raise RemoteMountError(f"Unsupported endpoint type: {t}")
 
-    rclone = _find_rclone()
-    remote_def, _ = _build_rclone_remote(endpoint)
-
-    # Preflight: validate that rclone can list the remote.
-    # This catches bad credentials / unreachable host early and provides a useful error.
-    try:
-        pre = subprocess.run(
-            [rclone, "lsf", remote_def, "--max-depth", "1"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=20,
-        )
-        if pre.returncode != 0:
-            err = (pre.stderr or pre.stdout or "").strip()
-            raise RemoteMountError(f"rclone preflight failed for {endpoint.type}: {err or 'unknown error'}")
-    except subprocess.TimeoutExpired:
-        raise RemoteMountError(f"rclone preflight timed out for {endpoint.type} endpoint")
+    if Share is None:
+        raise RemoteMountError("Share support not available (failed to import core.filesystem.share.Share)")
 
     # Mount under a stable temp folder for the job
     base = Path(tempfile.gettempdir()) / "replicator" / "mounts" / (str(job_id or "new")) / role
     base.mkdir(parents=True, exist_ok=True)
     mount_point = str(base)
 
-    cmd: List[str] = [rclone, "mount", remote_def, mount_point]
-    cmd += ["--ask-password", "false"]
+    # Parse endpoint location into host + remote path
+    host = ""
+    remote = ""
+    auth_in = dict(endpoint.auth or {}) if isinstance(endpoint.auth, dict) else {}
 
-    # Best-effort background on Unix. On Windows, we keep it in a subprocess.
-    if not _is_windows():
-        cmd += ["--daemon"]
+    if t == "smb":
+        host, share, subpath = _parse_smb_location(endpoint.location)
+        remote = share + (f"/{subpath}" if subpath else "")
 
-    # Some rclone builds may require --vfs-cache-mode for better behavior; allow user to set via auth/options
-    # If user provided extra rclone args in auth["rcloneArgs"] as a list, append them.
-    extra_args = endpoint.auth.get("rcloneArgs") if isinstance(endpoint.auth, dict) else None
-    if isinstance(extra_args, list):
-        for a in extra_args:
-            if isinstance(a, str) and a.strip():
-                cmd.append(a.strip())
+    elif t == "ftp":
+        host, path, user_from_loc = _parse_host_path_location(endpoint.location, "ftp")
+        remote = path
+        # If user not provided explicitly, accept user from URL/location
+        if user_from_loc and not auth_in.get("username"):
+            auth_in["username"] = user_from_loc
 
-    proc: Optional[subprocess.Popen] = None
-    if _is_windows():
-        # Start in background; rclone mount will keep running.
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        # Give it a moment to fail fast if something is wrong.
-        time.sleep(0.5)
-        if proc.poll() is not None and proc.returncode not in (None, 0):
-            try:
-                err = (proc.stderr.read() if proc.stderr else "")
-            except Exception:
-                err = ""
-            raise RemoteMountError(f"rclone mount failed (windows): {(err or '').strip() or 'unknown error'}")
-    else:
-        # With --daemon, rclone exits quickly; check return code.
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        if res.returncode != 0:
-            err = (res.stderr or res.stdout or "").strip()
-            raise RemoteMountError(f"rclone mount failed: {err or 'unknown error'}")
+    elif t == "ssh":
+        host, path, user_from_loc = _parse_host_path_location(endpoint.location, "sftp")
+        remote = path
+        if user_from_loc and not auth_in.get("username"):
+            auth_in["username"] = user_from_loc
 
-    # Wait briefly for mount to become usable.
-    # On some systems/FUSE setups the directory exists immediately but isn't connected yet.
-    deadline = time.time() + 15.0
-    last_exc: Optional[Exception] = None
-    while time.time() < deadline:
-        try:
-            # listdir will throw on common "not connected" errors
-            os.listdir(mount_point)
-            last_exc = None
-            break
-        except Exception as e:
-            last_exc = e
-        time.sleep(0.25)
+    # Build ShareAuth
+    try:
+        share_auth = ShareAuth(
+            username=str(auth_in.get("username") or ""),
+            password=str(auth_in.get("password") or ""),
+            domain=str(auth_in.get("domain") or ""),
+            port=int(auth_in.get("port") or (22 if t == "ssh" else 21 if t == "ftp" else 0)) or None,
+            private_key=str(auth_in.get("key") or ""),
+            guest=bool(auth_in.get("guest", True if t in ("smb",) else False)),
+        )
+    except Exception:
+        # Fallback if ShareAuth signature changes
+        share_auth = None
 
-    if last_exc is not None:
-        raise RemoteMountError(f"Timed out waiting for mount to become ready: {last_exc}")
+    share_logger = _ShareLogger(logger)
+    share = Share(logger=share_logger)
 
-    return _MountedEndpoint(local_path=mount_point, mount_point=mount_point, proc=proc)
+    # Allow passing through extra rclone args (e.g. VFS cache mode) via auth['rcloneArgs']
+    extra_args = auth_in.get("rcloneArgs") if isinstance(auth_in.get("rcloneArgs"), list) else None
+    if extra_args:
+        share_logger.debug(f"[Share] Extra mount args provided: {extra_args}")
+
+    # Mount
+    try:
+        share_logger.debug(f"[Share] Mount request: protocol={t} host={host} remote={remote} mount_point={mount_point}")
+        # Share.mount supports a generic signature; pass known fields.
+        share.mount(
+            protocol=t,
+            host=host,
+            remote=remote,
+            mount_point=mount_point,
+            auth=share_auth or auth_in,
+            timeout=timeout,
+            read_only=False,
+            elevate=False,
+        )
+    except Exception as e:
+        raise RemoteMountError(f"Failed to mount {t} endpoint via Share: {e}")
+
+    # Share performs its own probe logging; return the mounted endpoint.
+    return _MountedEndpoint(local_path=mount_point, mount_point=mount_point, share=share)
 
 
 # ---------------------------------------------------------------------------
@@ -801,9 +857,9 @@ class Job:
 
         # Resolve endpoints (mount remote endpoints to local paths via rclone)
         mounted: List[_MountedEndpoint] = []
-        src_m = _mount_endpoint_if_remote(self.sourceEndpoint, self.id, "source")
+        src_m = _mount_endpoint_if_remote(self.sourceEndpoint, self.id, "source", logger=logger)
         mounted.append(src_m)
-        dst_m = _mount_endpoint_if_remote(self.targetEndpoint, self.id, "target")
+        dst_m = _mount_endpoint_if_remote(self.targetEndpoint, self.id, "target", logger=logger)
         mounted.append(dst_m)
 
         src = src_m.local_path
