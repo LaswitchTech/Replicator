@@ -236,15 +236,23 @@ class _MountedEndpoint:
     proc: Optional[subprocess.Popen] = None
 
     def cleanup(self) -> None:
-        if self.mount_point:
-            try:
-                rclone = _find_rclone()
-                subprocess.run([rclone, "unmount", self.mount_point], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            except Exception:
-                pass
+        # On Windows, the mount is typically held by the running rclone process.
         if self.proc:
             try:
                 self.proc.terminate()
+            except Exception:
+                pass
+
+        if self.mount_point:
+            try:
+                rclone = _find_rclone()
+                subprocess.run(
+                    [rclone, "unmount", self.mount_point],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=15,
+                )
             except Exception:
                 pass
 
@@ -261,12 +269,29 @@ def _mount_endpoint_if_remote(endpoint: "Endpoint", job_id: Union[int, None], ro
     rclone = _find_rclone()
     remote_def, _ = _build_rclone_remote(endpoint)
 
+    # Preflight: validate that rclone can list the remote.
+    # This catches bad credentials / unreachable host early and provides a useful error.
+    try:
+        pre = subprocess.run(
+            [rclone, "lsf", remote_def, "--max-depth", "1"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=20,
+        )
+        if pre.returncode != 0:
+            err = (pre.stderr or pre.stdout or "").strip()
+            raise RemoteMountError(f"rclone preflight failed for {endpoint.type}: {err or 'unknown error'}")
+    except subprocess.TimeoutExpired:
+        raise RemoteMountError(f"rclone preflight timed out for {endpoint.type} endpoint")
+
     # Mount under a stable temp folder for the job
     base = Path(tempfile.gettempdir()) / "replicator" / "mounts" / (str(job_id or "new")) / role
     base.mkdir(parents=True, exist_ok=True)
     mount_point = str(base)
 
     cmd: List[str] = [rclone, "mount", remote_def, mount_point]
+    cmd += ["--ask-password", "false"]
 
     # Best-effort background on Unix. On Windows, we keep it in a subprocess.
     if not _is_windows():
@@ -284,19 +309,37 @@ def _mount_endpoint_if_remote(endpoint: "Endpoint", job_id: Union[int, None], ro
     if _is_windows():
         # Start in background; rclone mount will keep running.
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        # Give it a moment to fail fast if something is wrong.
+        time.sleep(0.5)
+        if proc.poll() is not None and proc.returncode not in (None, 0):
+            try:
+                err = (proc.stderr.read() if proc.stderr else "")
+            except Exception:
+                err = ""
+            raise RemoteMountError(f"rclone mount failed (windows): {(err or '').strip() or 'unknown error'}")
     else:
-        # With --daemon, rclone exits quickly; no need to keep a proc.
-        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        # With --daemon, rclone exits quickly; check return code.
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if res.returncode != 0:
+            err = (res.stderr or res.stdout or "").strip()
+            raise RemoteMountError(f"rclone mount failed: {err or 'unknown error'}")
 
-    # Wait briefly for mount to become available.
-    deadline = time.time() + 10.0
+    # Wait briefly for mount to become usable.
+    # On some systems/FUSE setups the directory exists immediately but isn't connected yet.
+    deadline = time.time() + 15.0
+    last_exc: Optional[Exception] = None
     while time.time() < deadline:
         try:
-            if os.path.isdir(mount_point) and (os.path.ismount(mount_point) or os.listdir(mount_point) is not None):
-                break
-        except Exception:
-            pass
+            # listdir will throw on common "not connected" errors
+            os.listdir(mount_point)
+            last_exc = None
+            break
+        except Exception as e:
+            last_exc = e
         time.sleep(0.25)
+
+    if last_exc is not None:
+        raise RemoteMountError(f"Timed out waiting for mount to become ready: {last_exc}")
 
     return _MountedEndpoint(local_path=mount_point, mount_point=mount_point, proc=proc)
 
@@ -773,8 +816,31 @@ class Job:
             if (self.direction or "").lower() == "bidirectional":
                 if not bidirectional_func:
                     raise NotImplementedError("Bidirectional engine not provided.")
+
+                # IMPORTANT:
+                # The bidirectional engine historically enforced local endpoints only by checking
+                # endpoint types. Since remote endpoints are mounted to local paths for the duration
+                # of the run, we provide a local-view of this job to the engine.
+                job_local_view = Job(
+                    id=self.id,
+                    name=self.name,
+                    enabled=self.enabled,
+                    mode=self.mode,
+                    direction=self.direction,
+                    allowDeletion=self.allowDeletion,
+                    preserveMetadata=self.preserveMetadata,
+                    conflictPolicy=self.conflictPolicy,
+                    pairId=self.pairId,
+                    sourceEndpoint=Endpoint(type="local", location=src, auth={}),
+                    targetEndpoint=Endpoint(type="local", location=dst, auth={}),
+                    schedule=self.schedule,
+                    lastRun=self.lastRun,
+                    lastResult=self.lastResult,
+                    lastError=self.lastError,
+                )
+
                 _log(f"[Job] Running bidirectional job '{self.name}': {src} <-> {dst}", "info")
-                ok, stats = bidirectional_func(self, None)
+                ok, stats = bidirectional_func(job_local_view, None)
             else:
                 if not copy_func:
                     raise NotImplementedError("Copy function not provided.")
