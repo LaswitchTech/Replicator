@@ -121,56 +121,6 @@ def _parse_smb_location(loc: str) -> tuple[str, str]:
     return host, remote
 
 
-def _parse_host_path_location(loc: str) -> tuple[str, str]:
-    """Parse ssh/ftp-ish location into (host, remote_path).
-
-    Accepts forms:
-      - user@host:/path/to/dir
-      - host:/path/to/dir
-      - host/path/to/dir
-      - sftp://user@host/path (user is ignored here; auth provides it)
-      - ftp://user@host/path
-
-    Returns:
-      host, remote_path (remote_path always starts with '/')
-    """
-    s = (loc or "").strip()
-    if not s:
-        raise RemoteMountError("Empty location")
-
-    # Strip scheme if present
-    if "://" in s:
-        try:
-            scheme, rest = s.split("://", 1)
-            s = rest
-        except Exception:
-            pass
-
-    # Drop user@ if provided (auth should carry username)
-    if "@" in s and not s.startswith("["):
-        # user@host:... or user@host/...
-        s = s.split("@", 1)[1]
-
-    host = ""
-    path = ""
-
-    if ":" in s:
-        host, path = s.split(":", 1)
-    elif "/" in s:
-        host, path = s.split("/", 1)
-        path = "/" + path
-    else:
-        host, path = s, "/"
-
-    host = host.strip()
-    path = (path or "/").strip()
-    if not path.startswith("/"):
-        path = "/" + path
-
-    if not host:
-        raise RemoteMountError(f"Invalid location: {loc}")
-
-    return host, path
 
 
 def _mount_endpoint_if_remote(
@@ -181,7 +131,7 @@ def _mount_endpoint_if_remote(
     share: Share,
     log_append,
 ) -> _MountedEndpoint:
-    """Mount SMB/FTP/SSH endpoints using Share and return a local path usable by the sync engine."""
+    """Mount SMB endpoints using Share and return a local path usable by the sync engine."""
 
     t = (endpoint.get("type") or "local").lower()
     loc = str(endpoint.get("location") or "").strip()
@@ -189,7 +139,7 @@ def _mount_endpoint_if_remote(
     if t == "local":
         return _MountedEndpoint(local_path=loc)
 
-    if t not in ("smb", "ftp", "ssh"):
+    if t != "smb":
         raise RemoteMountError(f"Unsupported endpoint type: {t}")
 
     base = Path(tempfile.gettempdir()) / "replicator" / "mounts" / (str(job_id or "new")) / role
@@ -214,13 +164,8 @@ def _mount_endpoint_if_remote(
         private_key=auth.get("sshKey") or auth.get("private_key"),
     )
 
-    # Parse host and remote from location
-    if t == "smb":
-        host, remote = _parse_smb_location(loc)
-    elif t in ("ftp", "ssh"):
-        host, remote = _parse_host_path_location(loc)
-    else:
-        raise RemoteMountError(f"Unsupported endpoint type: {t}")
+    # Parse host and remote from location (SMB only)
+    host, remote = _parse_smb_location(loc)
 
     # Determine port and options
     port = None
@@ -229,6 +174,8 @@ def _mount_endpoint_if_remote(
             port = int(auth.get("port"))
     except Exception:
         port = None
+    if port is None:
+        port = 445
 
     opts = {}
     if isinstance(auth.get("options"), dict):
@@ -236,7 +183,7 @@ def _mount_endpoint_if_remote(
 
     # Emit a safe debug line (mask secrets, include host/remote)
     safe_auth = dict(auth)
-    for k in ("password", "pass", "sshKey", "key", "key_file"):
+    for k in ("password", "pass"):
         if k in safe_auth and safe_auth[k]:
             safe_auth[k] = "***"
     log_append(
@@ -1451,7 +1398,7 @@ class Replicator(QMainWindow):
         ok = False
         try:
             if str(direction).lower() == "bidirectional":
-                # Mount remote endpoints (SMB/FTP/SSH) via Share so the bidirectional engine can
+                # Mount remote endpoints (SMB only) via Share so the bidirectional engine can
                 # operate on local filesystem paths AND we get proper connectivity debug logs.
                 mounted: list[_MountedEndpoint] = []
                 job_dict = job.to_legacy_dict()

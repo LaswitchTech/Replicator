@@ -44,8 +44,8 @@ def _redact_secrets(s: str) -> str:
     """Redact obvious credentials from command strings/log lines."""
     if not s:
         return s
-    # rclone on-the-fly remote: pass=..., user=...
     s = re.sub(r"(pass=)([^,\s]+)", r"\1***", s, flags=re.IGNORECASE)
+    s = re.sub(r"(password=)([^,\s]+)", r"\1***", s, flags=re.IGNORECASE)
     # common flags
     s = re.sub(r"(--password\s+)(\S+)", r"\1***", s, flags=re.IGNORECASE)
     s = re.sub(r"(--pass\s+)(\S+)", r"\1***", s, flags=re.IGNORECASE)
@@ -102,44 +102,6 @@ def _parse_smb_location(location: str) -> Tuple[str, str, str]:
     subpath = "/".join(parts[2:]) if len(parts) > 2 else ""
     return host, share, subpath
 
-def _parse_host_path_location(location: str, default_scheme: str) -> Tuple[str, str, Optional[str]]:
-    """Parse host/path from either URL form or host:/path.
-
-    Returns (host, path, user_from_location).
-
-    Accepts:
-      - ftp://host/path
-      - sftp://user@host:22/path
-      - user@host:/path
-      - host:/path
-    """
-    loc = (location or "").strip()
-
-    # URL form
-    if "://" in loc:
-        u = urlparse(loc)
-        host = u.hostname or ""
-        path = u.path or "/"
-        user = u.username
-        if not host:
-            raise RemoteMountError(f"Invalid {default_scheme} URL (missing host): {location}")
-        return host, path, user
-
-    # scp-ish form
-    if ":" in loc:
-        left, right = loc.split(":", 1)
-        user = None
-        host = left
-        if "@" in left:
-            user, host = left.split("@", 1)
-        path = right if right.startswith("/") else ("/" + right)
-        if not host:
-            raise RemoteMountError(f"Invalid {default_scheme} location (missing host): {location}")
-        return host, path, user
-
-    raise RemoteMountError(
-        f"Invalid {default_scheme} location. Use host:/path or {default_scheme}://host/path (got: {location})"
-    )
 
 @dataclass
 class _MountedEndpoint:
@@ -163,7 +125,7 @@ def _mount_endpoint_if_remote(
     logger: Optional[Callable[[str, str], None]] = None,
     timeout: int = 15,
 ) -> _MountedEndpoint:
-    """If endpoint is remote (smb/ftp/ssh), mount it and return local path; otherwise return local location.
+    """If endpoint is remote (smb), mount it and return local path; otherwise return local location.
 
     Uses core.filesystem.share.Share (rclone-backed on macOS when only rclone is bundled).
     """
@@ -171,7 +133,7 @@ def _mount_endpoint_if_remote(
     if t == "local":
         return _MountedEndpoint(local_path=endpoint.location)
 
-    if t not in ("smb", "ftp", "ssh"):
+    if t != "smb":
         raise RemoteMountError(f"Unsupported endpoint type: {t}")
 
     if Share is None:
@@ -191,28 +153,15 @@ def _mount_endpoint_if_remote(
         host, share, subpath = _parse_smb_location(endpoint.location)
         remote = share + (f"/{subpath}" if subpath else "")
 
-    elif t == "ftp":
-        host, path, user_from_loc = _parse_host_path_location(endpoint.location, "ftp")
-        remote = path
-        # If user not provided explicitly, accept user from URL/location
-        if user_from_loc and not auth_in.get("username"):
-            auth_in["username"] = user_from_loc
-
-    elif t == "ssh":
-        host, path, user_from_loc = _parse_host_path_location(endpoint.location, "sftp")
-        remote = path
-        if user_from_loc and not auth_in.get("username"):
-            auth_in["username"] = user_from_loc
-
     # Build ShareAuth
     try:
         share_auth = ShareAuth(
             username=str(auth_in.get("username") or ""),
             password=str(auth_in.get("password") or ""),
             domain=str(auth_in.get("domain") or ""),
-            port=int(auth_in.get("port") or (22 if t == "ssh" else 21 if t == "ftp" else 0)) or None,
+            port=int(auth_in.get("port") or 445) or None,
             private_key=str(auth_in.get("key") or ""),
-            guest=bool(auth_in.get("guest", True if t in ("smb",) else False)),
+            guest=bool(auth_in.get("guest", True)),
         )
     except Exception:
         # Fallback if ShareAuth signature changes
@@ -265,7 +214,7 @@ class Endpoint:
             errs.append(f"{role} endpoint location is required.")
         t = (self.type or "").lower()
 
-        if t in ("ftp", "ssh"):
+        if t == "smb":
             port = self.auth.get("port")
             if port is not None:
                 try:
@@ -290,34 +239,17 @@ class Endpoint:
 
         if t == "local":
             pass
-        elif t in ("smb", "ftp"):
+        elif t == "smb":
             guest = 1 if bool(auth.get("guest", True)) else 0
             username = auth.get("username") or None
             password = auth.get("password") or None
-            if t == "ftp":
-                try:
-                    port = int(auth.get("port", 21))
-                except Exception:
-                    port = 21
             # Optional SMB domain
-            if t == "smb":
-                options["domain"] = auth.get("domain")
+            options["domain"] = auth.get("domain")
             # Optional rclone args (applies to all remote types)
             if isinstance(auth.get("rcloneArgs"), list):
                 options["rcloneArgs"] = auth.get("rcloneArgs")
-        elif t == "ssh":
-            useKey = 1 if bool(auth.get("useKey", False)) else 0
-            username = auth.get("username") or None
-            password = auth.get("password") or None
-            try:
-                port = int(auth.get("port", 22))
-            except Exception:
-                port = 22
-            sshKey = auth.get("key") or None
-            if isinstance(auth.get("rcloneArgs"), list):
-                options["rcloneArgs"] = auth.get("rcloneArgs")
 
-        known_keys = {"guest", "username", "password", "port", "useKey", "key"}
+        known_keys = {"guest", "username", "password", "port", "domain"}
         for k, v in auth.items():
             if k not in known_keys:
                 options[k] = v
@@ -342,25 +274,14 @@ class Endpoint:
 
         if t == "local":
             auth = {}
-        elif t in ("smb", "ftp"):
+        elif t == "smb":
             auth = {
                 "guest": bool(row.get("guest", 1)),
                 "username": row.get("username") or "",
                 "password": row.get("password") or "",
             }
-            if t == "ftp":
-                auth["port"] = row.get("port") or 21
-            if t == "smb":
-                # domain is stored in options JSON when present
-                pass
-        elif t == "ssh":
-            auth = {
-                "useKey": bool(row.get("useKey", 0)),
-                "username": row.get("username") or "",
-                "password": row.get("password") or "",
-                "port": row.get("port") or 22,
-                "key": row.get("sshKey") or "",
-            }
+            auth["port"] = row.get("port") or 445
+            # domain is stored in options JSON when present
 
         opt = row.get("options")
         if opt:
@@ -702,7 +623,7 @@ class Job:
         preserve = bool(self.preserveMetadata)
         allow_del = bool(self.allowDeletion)
 
-        # Resolve endpoints (mount remote endpoints to local paths via rclone)
+        # Resolve endpoints (mount SMB endpoints to local paths for the duration of the run)
         mounted: List[_MountedEndpoint] = []
         src_m = _mount_endpoint_if_remote(self.sourceEndpoint, self.id, "source", logger=logger)
         mounted.append(src_m)

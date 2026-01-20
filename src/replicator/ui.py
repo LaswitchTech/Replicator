@@ -287,10 +287,12 @@ class JobDialog(QDialog):
 
     def _build_endpoint(self, existing: Dict[str, Any]):
         type_combo = QComboBox()
-        type_combo.addItems(["local", "smb", "ftp", "ssh"])
+        type_combo.addItems(["local", "smb"])
         idx = type_combo.findText(existing.get("type", "local"))
         if idx >= 0:
             type_combo.setCurrentIndex(idx)
+        if idx < 0:
+            type_combo.setCurrentIndex(0)
         type_combo.setFixedWidth(110)
         type_combo.setProperty("existing_type", existing.get("type", "local"))
         type_combo.setProperty("existing_auth", existing.get("auth", {}) or {})
@@ -300,15 +302,9 @@ class JobDialog(QDialog):
         port_spin = QSpinBox()
         port_spin.setRange(1, 65535)
         port_spin.setFixedWidth(110)
-
-        existing_type = existing.get("type", "local")
-        existing_auth = existing.get("auth", {}) or {}
-        if existing_type == "ftp":
-            port_spin.setValue(int(existing_auth.get("port", 21) or 21))
-        elif existing_type == "ssh":
-            port_spin.setValue(int(existing_auth.get("port", 22) or 22))
-        else:
-            port_spin.setValue(21)
+        # Ports are not used for local/SMB endpoints.
+        port_spin.setValue(1)
+        port_spin.setVisible(False)
 
         endpoint_fields = QWidget()
         fields_lay = QHBoxLayout(endpoint_fields)
@@ -394,84 +390,17 @@ class JobDialog(QDialog):
         smb_guest.stateChanged.connect(_smb_guest_update)
         _smb_guest_update()
 
-        # FTP auth
-        ftp_wrap = QWidget()
-        ftp_wrap.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
-        ftp_form = QFormLayout(ftp_wrap)
-        ftp_form.setContentsMargins(0, 0, 0, 0)
-        ftp_guest = QCheckBox("Login as Guest")
-        ftp_user_lbl = QLabel("Username")
-        ftp_username = QLineEdit()
-        ftp_pass_lbl = QLabel("Password")
-        ftp_password = QLineEdit()
-        ftp_password.setEchoMode(QLineEdit.Password)
-
-        ftp_auth = existing.get("auth", {}) if existing.get("type") == "ftp" else {}
-        ftp_guest.setChecked(bool(ftp_auth.get("guest", True)))
-        ftp_username.setText(ftp_auth.get("username", ""))
-        ftp_password.setText(ftp_auth.get("password", ""))
-
-        ftp_form.addRow(ftp_guest)
-        ftp_form.addRow(ftp_user_lbl, ftp_username)
-        ftp_form.addRow(ftp_pass_lbl, ftp_password)
-
-        def _ftp_guest_update():
-            guest = ftp_guest.isChecked()
-            ftp_user_lbl.setVisible(not guest)
-            ftp_username.setVisible(not guest)
-            ftp_pass_lbl.setVisible(not guest)
-            ftp_password.setVisible(not guest)
-
-        ftp_guest.stateChanged.connect(_ftp_guest_update)
-        _ftp_guest_update()
-
-        # SSH auth
-        ssh_wrap = QWidget()
-        ssh_wrap.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
-        ssh_form = QFormLayout(ssh_wrap)
-        ssh_form.setContentsMargins(0, 0, 0, 0)
-        ssh_use_key = QCheckBox("Use SSH Key")
-        ssh_user_lbl = QLabel("Username")
-        ssh_username = QLineEdit()
-        ssh_pass_lbl = QLabel("Password")
-        ssh_password = QLineEdit()
-        ssh_password.setEchoMode(QLineEdit.Password)
-        ssh_key_lbl = QLabel("SSH Key")
-        ssh_key_text = QTextEdit()
-        ssh_key_text.setPlaceholderText("Paste SSH private key here...")
-        ssh_key_text.setFixedHeight(110)
-
-        ssh_auth = existing.get("auth", {}) if existing.get("type") == "ssh" else {}
-        ssh_username.setText(ssh_auth.get("username", ""))
-        ssh_password.setText(ssh_auth.get("password", ""))
-        ssh_key_text.setPlainText(ssh_auth.get("key", ""))
-        ssh_use_key.setChecked(bool(ssh_auth.get("useKey", True if not ssh_password.text().strip() else False)))
-
-        ssh_form.addRow(ssh_use_key)
-        ssh_form.addRow(ssh_user_lbl, ssh_username)
-        ssh_form.addRow(ssh_pass_lbl, ssh_password)
-        ssh_form.addRow(ssh_key_lbl, ssh_key_text)
-
-        def _ssh_use_key_update():
-            use_key = ssh_use_key.isChecked()
-            ssh_user_lbl.setVisible(True)
-            ssh_username.setVisible(True)
-            ssh_pass_lbl.setVisible(not use_key)
-            ssh_password.setVisible(not use_key)
-            ssh_key_lbl.setVisible(use_key)
-            ssh_key_text.setVisible(use_key)
-
-        ssh_use_key.stateChanged.connect(_ssh_use_key_update)
-        _ssh_use_key_update()
-
         auth_lay.addWidget(auth_title)
         auth_lay.addWidget(smb_wrap)
-        auth_lay.addWidget(ftp_wrap)
-        auth_lay.addWidget(ssh_wrap)
 
-        widgets["smb"] = {"wrap": smb_wrap, "guest": smb_guest, "user_lbl": smb_user_lbl, "username": smb_username, "pass_lbl": smb_pass_lbl, "password": smb_password}
-        widgets["ftp"] = {"wrap": ftp_wrap, "guest": ftp_guest, "user_lbl": ftp_user_lbl, "username": ftp_username, "pass_lbl": ftp_pass_lbl, "password": ftp_password}
-        widgets["ssh"] = {"wrap": ssh_wrap, "useKey": ssh_use_key, "user_lbl": ssh_user_lbl, "username": ssh_username, "pass_lbl": ssh_pass_lbl, "password": ssh_password, "key_lbl": ssh_key_lbl, "key": ssh_key_text}
+        widgets["smb"] = {
+            "wrap": smb_wrap,
+            "guest": smb_guest,
+            "user_lbl": smb_user_lbl,
+            "username": smb_username,
+            "pass_lbl": smb_pass_lbl,
+            "password": smb_password,
+        }
 
         return type_combo, location_edit, port_spin, endpoint_row, auth_widget, widgets
 
@@ -489,34 +418,14 @@ class JobDialog(QDialog):
         placeholder = {
             "local": "Local path (e.g. /data or C:\\Data)",
             "smb": "SMB path (e.g. \\\\SERVER\\Share\\Folder)",
-            "ftp": "FTP host/path (e.g. ftp.example.com:/folder)",
-            "ssh": "SSH host/path (e.g. example.com:/folder)",
         }.get(typ, "")
         location_edit.setPlaceholderText(placeholder)
         # For local endpoints, clicking the location field opens a folder chooser.
         # For non-local endpoints, keep normal typing behavior.
         if (typ or "").lower() == "local":
             location_edit.setCursorPosition(len(location_edit.text()))
-
-        if typ in ("ftp", "ssh"):
-            port_spin.setVisible(True)
-
-            existing_type = type_combo.property("existing_type") or "local"
-            existing_auth = type_combo.property("existing_auth") or {}
-
-            if initial and existing_type == typ:
-                if typ == "ftp":
-                    port_spin.setValue(int(existing_auth.get("port", 21) or 21))
-                else:
-                    port_spin.setValue(int(existing_auth.get("port", 22) or 22))
-            else:
-                cur = int(port_spin.value())
-                if typ == "ftp" and cur in (0, 22):
-                    port_spin.setValue(21)
-                elif typ == "ssh" and cur in (0, 21):
-                    port_spin.setValue(22)
-        else:
-            port_spin.setVisible(False)
+        # Ports are not used for local/SMB endpoints.
+        port_spin.setVisible(False)
 
         if typ == "local":
             auth_widget.setVisible(False)
@@ -525,15 +434,15 @@ class JobDialog(QDialog):
             auth_widget.setVisible(True)
             auth_widget.setMaximumHeight(16777215)
 
-        for key in ("smb", "ftp", "ssh"):
+        # Hide all auth sections
+        for key in ("smb",):
             if key in widgets and "wrap" in widgets[key]:
                 widgets[key]["wrap"].setVisible(False)
 
-        if typ in ("smb", "ftp", "ssh"):
-            widgets[typ]["wrap"].setVisible(True)
-
-        if typ in ("smb", "ftp"):
-            w = widgets[typ]
+        # Show only the relevant auth section
+        if typ == "smb":
+            widgets["smb"]["wrap"].setVisible(True)
+            w = widgets["smb"]
             if w["guest"].isChecked() is False:
                 if not w["username"].text().strip() and not w["password"].text().strip():
                     w["guest"].setChecked(True)
@@ -565,46 +474,18 @@ class JobDialog(QDialog):
             MsgBox.show(self, "Job", "Target location is required.", icon="warning")
             return
 
-        if src_type in ("smb", "ftp"):
-            w = self._source_auth_widgets[src_type]
+        if src_type == "smb":
+            w = self._source_auth_widgets["smb"]
             if not w["guest"].isChecked():
                 if not w["username"].text().strip() or not w["password"].text().strip():
                     MsgBox.show(self, "Job", "Source username and password are required.", icon="warning")
                     return
-        elif src_type == "ssh":
-            w = self._source_auth_widgets["ssh"]
-            if not w["username"].text().strip():
-                MsgBox.show(self, "Job", "Source SSH username is required.", icon="warning")
-                return
-            use_key = w["useKey"].isChecked()
-            if use_key:
-                if not w["key"].toPlainText().strip():
-                    MsgBox.show(self, "Job", "Source SSH key is required when 'Use SSH Key' is enabled.", icon="warning")
-                    return
-            else:
-                if not w["password"].text().strip():
-                    MsgBox.show(self, "Job", "Source SSH password is required when not using a key.", icon="warning")
-                    return
 
-        if tgt_type in ("smb", "ftp"):
-            w = self._target_auth_widgets[tgt_type]
+        if tgt_type == "smb":
+            w = self._target_auth_widgets["smb"]
             if not w["guest"].isChecked():
                 if not w["username"].text().strip() or not w["password"].text().strip():
                     MsgBox.show(self, "Job", "Target username and password are required.", icon="warning")
-                    return
-        elif tgt_type == "ssh":
-            w = self._target_auth_widgets["ssh"]
-            if not w["username"].text().strip():
-                MsgBox.show(self, "Job", "Target SSH username is required.", icon="warning")
-                return
-            use_key = w["useKey"].isChecked()
-            if use_key:
-                if not w["key"].toPlainText().strip():
-                    MsgBox.show(self, "Job", "Target SSH key is required when 'Use SSH Key' is enabled.", icon="warning")
-                    return
-            else:
-                if not w["password"].text().strip():
-                    MsgBox.show(self, "Job", "Target SSH password is required when not using a key.", icon="warning")
                     return
 
         self.accept()
@@ -623,13 +504,15 @@ class JobDialog(QDialog):
                 auth = {}
             elif typ == "smb":
                 w = widgets["smb"]
-                auth = {"guest": bool(w["guest"].isChecked()), "username": w["username"].text().strip(), "password": w["password"].text()}
-            elif typ == "ftp":
-                w = widgets["ftp"]
-                auth = {"guest": bool(w["guest"].isChecked()), "username": w["username"].text().strip(), "password": w["password"].text(), "port": int(port_spin.value())}
-            elif typ == "ssh":
-                w = widgets["ssh"]
-                auth = {"useKey": bool(w["useKey"].isChecked()), "username": w["username"].text().strip(), "password": w["password"].text(), "port": int(port_spin.value()), "key": w["key"].toPlainText()}
+                auth = {
+                    "guest": bool(w["guest"].isChecked()),
+                    "username": w["username"].text().strip(),
+                    "password": w["password"].text(),
+                }
+            else:
+                # Unsupported/legacy types fall back to local
+                typ = "local"
+                auth = {}
 
             return {"type": typ, "location": location, "auth": auth}
 
