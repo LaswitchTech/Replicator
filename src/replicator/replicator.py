@@ -12,8 +12,12 @@ import tempfile
 import time
 from pathlib import Path
 
+
 # Add datetime import for lastRun/lastResult
 from datetime import datetime, timezone, timedelta
+
+# For percent-encoding SMB remote paths
+from urllib.parse import quote
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QPixmap
@@ -152,7 +156,7 @@ def _mount_endpoint_if_remote(
         auth.update(endpoint.get("auth") or {})
 
     # Backward-compatible: endpoints table columns may be stored at top-level
-    for k in ("port", "guest", "username", "password", "useKey", "sshKey", "options"):
+    for k in ("port", "guest", "username", "password", "options"):
         if k in endpoint and endpoint.get(k) is not None and k not in auth:
             auth[k] = endpoint.get(k)
 
@@ -165,6 +169,9 @@ def _mount_endpoint_if_remote(
 
     # Parse host and remote from location (SMB only)
     host, remote = _parse_smb_location(loc)
+    # mount_smbfs (used by Share on macOS) expects a URL-like remote; spaces and other
+    # characters must be percent-encoded, but keep '/' separators intact.
+    remote = quote(remote, safe="/")
 
     # Determine port and options
     port = None
@@ -1522,7 +1529,7 @@ class Replicator(QMainWindow):
                         self._log(f"[Replicator][DB] {t}: latest {len(rows)} row(s)", level="debug")
                         for r in rows:
                             dr = dict(r)
-                            for k in ("password", "pass", "sshKey", "key_file"):
+                            for k in ("password", "pass"):
                                 if k in dr and dr[k]:
                                     dr[k] = "***"
                             self._log(f"[Replicator][DB] {t}: {dr}", level="debug")

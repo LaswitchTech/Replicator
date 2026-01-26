@@ -12,7 +12,7 @@ import sqlite3
 import tempfile
 import time
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 
 import os
 import re
@@ -152,6 +152,9 @@ def _mount_endpoint_if_remote(
     if t == "smb":
         host, share, subpath = _parse_smb_location(endpoint.location)
         remote = share + (f"/{subpath}" if subpath else "")
+        # mount_smbfs expects a URL-like path; spaces and other characters must be percent-encoded
+        # while keeping '/' separators intact.
+        remote = quote(remote, safe="/")
 
     # Build ShareAuth
     try:
@@ -232,8 +235,6 @@ class Endpoint:
         guest: int = 1
         username: Optional[str] = None
         password: Optional[str] = None
-        useKey: int = 0
-        sshKey: Optional[str] = None
         options: JsonDict = {}
 
         if t == "local":
@@ -261,8 +262,6 @@ class Endpoint:
             "guest": guest,
             "username": username,
             "password": password,
-            "useKey": useKey,
-            "sshKey": sshKey,
             "options": json.dumps(options) if options else None,
         }
 
@@ -991,15 +990,13 @@ class JobStore:
                     "guest": ep.get("guest"),
                     "username": ep.get("username"),
                     "password": ep.get("password"),
-                    "useKey": ep.get("useKey"),
-                    "sshKey": ep.get("sshKey"),
                     "options": ep.get("options"),
                 }
                 self._upsert(
                     "endpoints",
                     ep_data,
                     ["jobId", "role"],
-                    update_columns=["type", "location", "port", "guest", "username", "password", "useKey", "sshKey", "options"],
+                    update_columns=["type", "location", "port", "guest", "username", "password", "options"],
                 )
 
             # --- schedule (unique: jobId) ---

@@ -155,8 +155,6 @@ class Migration:
                         guest INTEGER NOT NULL DEFAULT 1,
                         username TEXT NULL,
                         password TEXT NULL,
-                        useKey INTEGER NOT NULL DEFAULT 0,
-                        sshKey TEXT NULL,
                         options TEXT NULL,
                         FOREIGN KEY(jobId) REFERENCES jobs(id) ON DELETE CASCADE
                     );
