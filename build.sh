@@ -124,6 +124,7 @@ Options:
   --python PY                Python 3.11 binary (default: python3.11 from PATH)
   --system-pyqt              On Linux ARM, prefer APT PyQt5 with --system-site-packages
   --clean                    Remove build/dist artifacts before building
+  --debug-pyi                Enable PyInstaller debug output (--log-level=DEBUG --debug=all)
   --dmg                      On macOS, create a DMG (only meaningful for onedir .app)
   -h, --help                 Show this help
 
@@ -150,8 +151,11 @@ PKG=""                     # empty = auto, or onefile/onedir
 PYTHON_BIN="$(command -v python3.11 || true)"
 USE_SYSTEM_PYQT=0
 
-# macOS DMG toggle
+ # macOS DMG toggle
 MAKE_DMG=0
+
+# PyInstaller debug toggle
+PYI_DEBUG=0
 
 # Icon (optional)
 ICON_FILE=""
@@ -360,6 +364,9 @@ while [ $# -gt 0 ]; do
     --clean)
       CLEAN=1
       ;;
+    --debug-pyi)
+      PYI_DEBUG=1
+      ;;
     --dmg)
       MAKE_DMG=1
       ;;
@@ -566,6 +573,11 @@ PYI_ARGS=(
   --noconfirm
 )
 
+# Optional PyInstaller debug
+if [ "${PYI_DEBUG:-0}" -eq 1 ]; then
+  PYI_ARGS+=(--log-level=DEBUG --debug=all)
+fi
+
 # Packaging
 if [ "$PKG" = "onefile" ]; then
   PYI_ARGS+=(--onefile)
@@ -584,9 +596,37 @@ if [ -n "$ICON_FILE" ] && [ -f "$ICON_FILE" ]; then
 fi
 
 # Hidden imports
+# NOTE:
+# - PyQt5 typically exposes SIP bindings as `PyQt5.sip` (and ships `PyQt5_sip` as a wheel).
+# - Users sometimes add `sip` as a hidden import; that module often does not exist and causes warnings.
+# We normalize `sip` -> `PyQt5.sip` when available, and skip hidden imports that cannot be resolved.
+can_import() {
+  # usage: can_import module.name
+  python - <<PY >/dev/null 2>&1
+import importlib.util
+spec = importlib.util.find_spec("$1")
+raise SystemExit(0 if spec is not None else 1)
+PY
+}
+
 for hi in "${HIDDEN_IMPORTS[@]+${HIDDEN_IMPORTS[@]}}"; do
   [ -n "$hi" ] || continue
-  PYI_ARGS+=(--hidden-import "$hi")
+
+  # Normalize common SIP hidden import for PyQt5
+  if [ "$hi" = "sip" ]; then
+    if can_import "sip"; then
+      :
+    elif can_import "PyQt5.sip"; then
+      log "Normalizing hidden import: sip -> PyQt5.sip"
+      hi="PyQt5.sip"
+    fi
+  fi
+
+  if can_import "$hi"; then
+    PYI_ARGS+=(--hidden-import "$hi")
+  else
+    log "WARN: Skipping hidden import not found: $hi"
+  fi
 done
 
 # Data
