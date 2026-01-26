@@ -1,62 +1,507 @@
 #!/bin/bash
 set -euo pipefail
 
-# Function to print messages with a timestamp
+# -----------------------------------------------------------------------------
+# build.sh (generic PyInstaller build script)
+# - Designed to be reused across LaswitchTech projects
+# - Defaults work out-of-the-box for this repo (Replicator)
+# -----------------------------------------------------------------------------
+
 log() {
-    echo "$(date +'%Y-%m-%d %H:%M:%S') - $1"
+  echo "$(date +'%Y-%m-%d %H:%M:%S') - $*"
 }
 
-# Function to detect the operating system
+die() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
 detect_os() {
-    case "$(uname -s)" in
-        Darwin)
-            echo "macos"
-            ;;
-        Linux)
-            echo "linux"
-            ;;
-        *)
-            echo "unsupported"
-            ;;
-    esac
+  case "$(uname -s)" in
+    Darwin) echo "macos" ;;
+    Linux)  echo "linux" ;;
+    WindowsNT|MINGW64*|MINGW32*|MSYS*|CYGWIN*) echo "windows" ;;
+    *) echo "unsupported" ;;
+  esac
 }
 
-# Set the name of the application
-NAME="PyRDPConnect"
 
-# Determine the operating system
-OS=$(detect_os)
+# Portable in-place sed (macOS vs GNU)
+sed_inplace() {
+  # usage: sed_inplace 's/a/b/' file
+  if sed --version >/dev/null 2>&1; then
+    sed -i "$1" "$2"
+  else
+    sed -i '' "$1" "$2"
+  fi
+}
 
-if [ "$OS" == "unsupported" ]; then
-    log "Unsupported operating system. Exiting."
-    exit 1
-fi
+# -----------------------------------------------------------------------------
+# macOS icon generation: icon.svg -> icon.icns
+# Regenerates on every build (macOS only) when src/icons/icon.svg exists.
+# Requires: iconutil (built-in) + either rsvg-convert (librsvg) OR inkscape.
+# -----------------------------------------------------------------------------
 
-# Determine arch and whether we should use system PyQt5 (APT) on Linux ARM
-ARCH="$(uname -m)"
+generate_icns_from_svg_macos() {
+  [ "$OS" = "macos" ] || return 0
+
+  local svg="src/icons/icon.svg"
+  local out="src/icons/icon.icns"
+
+  [ -f "$svg" ] || return 0
+
+  if ! command -v iconutil >/dev/null 2>&1; then
+    log "WARN: iconutil not found; cannot generate .icns from $svg"
+    return 0
+  fi
+
+  local renderer=""
+  if command -v rsvg-convert >/dev/null 2>&1; then
+    renderer="rsvg"
+  elif command -v inkscape >/dev/null 2>&1; then
+    renderer="inkscape"
+  else
+    log "WARN: Neither rsvg-convert nor inkscape found; cannot generate .icns from $svg"
+    log "      Install one of them (recommended: brew install librsvg)"
+    return 0
+  fi
+
+  mkdir -p "build"
+
+  local iconset="build/icon.iconset"
+  rm -rf "$iconset"
+  mkdir -p "$iconset"
+
+  # Required sizes for iconutil
+  local sizes=(16 32 128 256 512)
+
+  log "Regenerating macOS icon: $out (from $svg using $renderer)"
+
+  for s in "${sizes[@]}"; do
+    local s2=$((s * 2))
+
+    if [ "$renderer" = "rsvg" ]; then
+      rsvg-convert -w "$s"  -h "$s"  "$svg" -o "$iconset/icon_${s}x${s}.png"
+      rsvg-convert -w "$s2" -h "$s2" "$svg" -o "$iconset/icon_${s}x${s}@2x.png"
+    else
+      # inkscape CLI (v1+)
+      inkscape "$svg" --export-type=png --export-width="$s"  --export-height="$s"  --export-filename="$iconset/icon_${s}x${s}.png" >/dev/null 2>&1
+      inkscape "$svg" --export-type=png --export-width="$s2" --export-height="$s2" --export-filename="$iconset/icon_${s}x${s}@2x.png" >/dev/null 2>&1
+    fi
+  done
+
+  # Build .icns
+  iconutil -c icns "$iconset" -o "$out"
+
+  # Cleanup iconset directory (keep build folder)
+  rm -rf "$iconset"
+}
+
+# Guess app name from current folder if not provided
+infer_name() {
+  local base
+  base="$(basename "$(pwd)")"
+  # keep it simple: only allow alnum, dash, underscore
+  echo "$base" | tr -cd '[:alnum:]_-'
+}
+
+show_help() {
+  cat <<'EOF'
+Usage:
+  ./build.sh [options]
+
+Options:
+  --name NAME                App name (default: folder name)
+  --entry PATH               Entry script/module for PyInstaller (default: src/main.py)
+  --config PATH              Path to build.cfg (default: ./build.cfg if present)
+  --windowed                 Build GUI app (no console) (macOS: --windowed; Linux: still onefile)
+  --console                  Build console app (default)
+  --icon PATH                Icon path (macOS: .icns recommended)
+  --add-data SRC:DST         Add data folder/file (repeatable). Uses PyInstaller --add-data=SRC:DST.
+  --hidden-import MOD        Add hidden import (repeatable)
+  --onefile                  Force onefile (default on Linux)
+  --onedir                   Force onedir (default on macOS)
+  --python PY                Python 3.11 binary (default: python3.11 from PATH)
+  --system-pyqt              On Linux ARM, prefer APT PyQt5 with --system-site-packages
+  --clean                    Remove build/dist artifacts before building
+  --dmg                      On macOS, create a DMG (only meaningful for onedir .app)
+  -h, --help                 Show this help
+
+Examples:
+  ./build.sh --name Replicator --entry src/main.py --windowed --add-data src/app:app
+  ./build.sh --console --hidden-import PyQt5.QtSvg
+EOF
+}
+
+# -----------------------------------------------------------------------------
+# Defaults (good for Replicator)
+# -----------------------------------------------------------------------------
+OS="$(detect_os)"
+[ "$OS" = "unsupported" ] && die "Unsupported operating system."
+
+APP_NAME="$(infer_name)"
+ENTRY="src/main.py"
+MODE="console"             # console|windowed
+
+# Packaging defaults: macOS prefers onedir (for .app), Linux prefers onefile
+PKG=""                     # empty = auto, or onefile/onedir
+
+# Python / venv defaults
+PYTHON_BIN="$(command -v python3.11 || true)"
 USE_SYSTEM_PYQT=0
+
+# macOS DMG toggle
+MAKE_DMG=0
+
+# Icon (optional)
+ICON_FILE=""
+
+# Repeatable arrays
+ADD_DATA=()
+HIDDEN_IMPORTS=()
+
+# Common default data folders (only add if they exist)
+# Replicator usually has icons/app/styles/img in some projects; keep generic.
+DEFAULT_DATA_CANDIDATES=(
+  "src/app:app"
+  "src/styles:styles"
+  "src/icons:icons"
+  "src/img:img"
+  "assets:assets"
+)
+
+# Optional config file
+CFG_FILE=""
+
+# Load simple KEY=VALUE config (no code execution)
+# Supported keys:
+#   NAME, ENTRY, MODE, PKG, ICON, PYTHON, SYSTEM_PYQT, DMG, CLEAN
+#   ADD_DATA, HIDDEN_IMPORTS
+# Notes:
+# - Lines beginning with # or ; are ignored
+# - Whitespace around keys/values is trimmed
+# - ADD_DATA / HIDDEN_IMPORTS can be comma or semicolon separated
+trim_ws() {
+  # trim leading/trailing whitespace
+  local s="$1"
+  s="${s#${s%%[![:space:]]*}}"
+  s="${s%${s##*[![:space:]]}}"
+  echo "$s"
+}
+
+split_list() {
+  # split comma/semicolon separated list into lines
+  echo "$1" | tr ';' '\n' | tr ',' '\n'
+}
+
+apply_cfg_kv() {
+  local key="$1" val="$2"
+  key="$(trim_ws "$key")"
+  val="$(trim_ws "$val")"
+  [ -z "$key" ] && return 0
+
+  case "$key" in
+    NAME)
+      APP_NAME="$val"
+      ;;
+    ENTRY)
+      ENTRY="$val"
+      ;;
+    MODE)
+      # console|windowed
+      if [ "$val" = "console" ] || [ "$val" = "windowed" ]; then
+        MODE="$val"
+      fi
+      ;;
+    PKG)
+      # onefile|onedir|auto
+      if [ "$val" = "onefile" ] || [ "$val" = "onedir" ]; then
+        PKG="$val"
+      elif [ "$val" = "auto" ]; then
+        PKG=""
+      fi
+      ;;
+    ICON)
+      ICON_FILE="$val"
+      ;;
+    PYTHON)
+      PYTHON_BIN="$val"
+      ;;
+    SYSTEM_PYQT)
+      if [ "$val" = "1" ] || [ "$val" = "true" ] || [ "$val" = "yes" ]; then
+        USE_SYSTEM_PYQT=1
+      elif [ "$val" = "0" ] || [ "$val" = "false" ] || [ "$val" = "no" ]; then
+        USE_SYSTEM_PYQT=0
+      fi
+      ;;
+    DMG)
+      if [ "$val" = "1" ] || [ "$val" = "true" ] || [ "$val" = "yes" ]; then
+        MAKE_DMG=1
+      elif [ "$val" = "0" ] || [ "$val" = "false" ] || [ "$val" = "no" ]; then
+        MAKE_DMG=0
+      fi
+      ;;
+    CLEAN)
+      if [ "$val" = "1" ] || [ "$val" = "true" ] || [ "$val" = "yes" ]; then
+        CLEAN=1
+      elif [ "$val" = "0" ] || [ "$val" = "false" ] || [ "$val" = "no" ]; then
+        CLEAN=0
+      fi
+      ;;
+    ADD_DATA)
+      # replaces current list
+      ADD_DATA=()
+      while IFS= read -r item; do
+        item="$(trim_ws "$item")"
+        [ -n "$item" ] && ADD_DATA+=("$item")
+      done < <(split_list "$val")
+      ;;
+    HIDDEN_IMPORTS)
+      # replaces current list
+      HIDDEN_IMPORTS=()
+      while IFS= read -r item; do
+        item="$(trim_ws "$item")"
+        [ -n "$item" ] && HIDDEN_IMPORTS+=("$item")
+      done < <(split_list "$val")
+      ;;
+    *)
+      # unknown keys ignored for forward-compat
+      ;;
+  esac
+}
+
+load_cfg_file() {
+  local f="$1"
+  [ -f "$f" ] || return 0
+  log "Loading config: $f"
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    # strip CR (Windows line endings)
+    line="${line%$'\r'}"
+
+    # ignore comments/blank lines
+    case "$(trim_ws "$line")" in
+      ""|\#*|\;*) continue ;;
+    esac
+
+    # allow inline comments after a value using #
+    # (only if there is at least one space before #)
+    if echo "$line" | grep -q "[[:space:]]#"; then
+      line="$(echo "$line" | sed 's/[[:space:]]#.*$//')"
+    fi
+
+    if echo "$line" | grep -q "="; then
+      local k v
+      k="${line%%=*}"
+      v="${line#*=}"
+      apply_cfg_kv "$k" "$v"
+    fi
+  done < "$f"
+}
+
+# -----------------------------------------------------------------------------
+# Parse args
+# -----------------------------------------------------------------------------
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --name)
+      shift
+      [ $# -gt 0 ] || die "--name requires a value"
+      APP_NAME="$1"
+      ;;
+    --entry)
+      shift
+      [ $# -gt 0 ] || die "--entry requires a value"
+      ENTRY="$1"
+      ;;
+    --config)
+      shift
+      [ $# -gt 0 ] || die "--config requires a value"
+      CFG_FILE="$1"
+      ;;
+    --windowed)
+      MODE="windowed"
+      ;;
+    --console)
+      MODE="console"
+      ;;
+    --icon)
+      shift
+      [ $# -gt 0 ] || die "--icon requires a value"
+      ICON_FILE="$1"
+      ;;
+    --add-data)
+      shift
+      [ $# -gt 0 ] || die "--add-data requires a value like SRC:DST"
+      ADD_DATA+=("$1")
+      ;;
+    --hidden-import)
+      shift
+      [ $# -gt 0 ] || die "--hidden-import requires a module name"
+      HIDDEN_IMPORTS+=("$1")
+      ;;
+    --onefile)
+      PKG="onefile"
+      ;;
+    --onedir)
+      PKG="onedir"
+      ;;
+    --python)
+      shift
+      [ $# -gt 0 ] || die "--python requires a path/binary"
+      PYTHON_BIN="$1"
+      ;;
+    --system-pyqt)
+      USE_SYSTEM_PYQT=1
+      ;;
+    --clean)
+      CLEAN=1
+      ;;
+    --dmg)
+      MAKE_DMG=1
+      ;;
+    -h|--help)
+      show_help
+      exit 0
+      ;;
+    *)
+      die "Unknown option: $1 (use --help)"
+      ;;
+  esac
+  shift
+done
+
+# -----------------------------------------------------------------------------
+# Load config (if provided, or if ./build.cfg exists)
+# CLI flags should override config values.
+# -----------------------------------------------------------------------------
+
+# Capture what the user explicitly set via CLI so we can re-apply after config
+CLI_APP_NAME="$APP_NAME"
+CLI_ENTRY="$ENTRY"
+CLI_MODE="$MODE"
+CLI_PKG="$PKG"
+CLI_ICON="$ICON_FILE"
+CLI_PYTHON_BIN="$PYTHON_BIN"
+CLI_USE_SYSTEM_PYQT="$USE_SYSTEM_PYQT"
+CLI_MAKE_DMG="$MAKE_DMG"
+CLI_CLEAN="${CLEAN:-0}"
+CLI_ADD_DATA=("${ADD_DATA[@]}")
+CLI_HIDDEN_IMPORTS=("${HIDDEN_IMPORTS[@]}")
+
+# Determine config path
+if [ -z "$CFG_FILE" ] && [ -f "build.cfg" ]; then
+  CFG_FILE="build.cfg"
+fi
+
+# Apply config
+if [ -n "$CFG_FILE" ]; then
+  load_cfg_file "$CFG_FILE"
+fi
+
+# Re-apply CLI values only when the user actually supplied flags.
+# Heuristic: if arrays were empty pre-config but are non-empty post-config,
+# we only override them when CLI provided values (captured arrays non-empty).
+# Scalars: if CLI value differs from the default-initialized value AND the flag was used,
+# we treat it as explicitly set. For simplicity, we treat any CLI value as authoritative
+# when it differs from what config loaded.
+
+# Scalars
+[ "$CLI_APP_NAME" != "$(infer_name)" ] && APP_NAME="$CLI_APP_NAME" || true
+[ "$CLI_ENTRY" != "src/main.py" ] && ENTRY="$CLI_ENTRY" || true
+[ "$CLI_MODE" != "console" ] && MODE="$CLI_MODE" || true
+[ -n "$CLI_PKG" ] && PKG="$CLI_PKG" || true
+[ -n "$CLI_ICON" ] && ICON_FILE="$CLI_ICON" || true
+[ "$CLI_PYTHON_BIN" != "$(command -v python3.11 || true)" ] && PYTHON_BIN="$CLI_PYTHON_BIN" || true
+[ "$CLI_USE_SYSTEM_PYQT" != "0" ] && USE_SYSTEM_PYQT="$CLI_USE_SYSTEM_PYQT" || true
+[ "$CLI_MAKE_DMG" != "0" ] && MAKE_DMG="$CLI_MAKE_DMG" || true
+if [ "$CLI_CLEAN" = "1" ]; then CLEAN=1; fi
+
+# Arrays
+if [ "${#CLI_ADD_DATA[@]}" -gt 0 ]; then
+  nonempty=0
+  for v in "${CLI_ADD_DATA[@]}"; do
+    [ -n "$v" ] && nonempty=1
+  done
+  if [ "$nonempty" -eq 1 ]; then
+    ADD_DATA=("${CLI_ADD_DATA[@]}")
+  fi
+fi
+
+if [ "${#CLI_HIDDEN_IMPORTS[@]}" -gt 0 ]; then
+  nonempty=0
+  for v in "${CLI_HIDDEN_IMPORTS[@]}"; do
+    [ -n "$v" ] && nonempty=1
+  done
+  if [ "$nonempty" -eq 1 ]; then
+    HIDDEN_IMPORTS=("${CLI_HIDDEN_IMPORTS[@]}")
+  fi
+fi
+
+# -----------------------------------------------------------------------------
+# macOS: regenerate icon.icns from icon.svg on every build (if present)
+# -----------------------------------------------------------------------------
+generate_icns_from_svg_macos
+
+# -----------------------------------------------------------------------------
+# Validate
+# -----------------------------------------------------------------------------
+[ -n "$PYTHON_BIN" ] || die "python3.11 not found. On macOS: brew install python@3.11"
+[ -f "$ENTRY" ] || die "Entry not found: $ENTRY"
+
+ARCH="$(uname -m)"
 if [ "$OS" = "linux" ] && { [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "armv7l" ] || [ "$ARCH" = "armhf" ]; }; then
-    USE_SYSTEM_PYQT=1
+  # Auto-enable system PyQt on ARM unless explicitly overridden by user (flag)
+  # Keeping your prior behavior but behind the switch.
+  :
 fi
 
-# Path to a vendored FreeRDP binary (set on macOS; Linux uses --add-data and resolves at runtime)
-FREERDP_BIN=""
+# Auto package choice
+if [ -z "$PKG" ]; then
+  if [ "$OS" = "macos" ]; then
+    PKG="onedir"
+  else
+    PKG="onefile"
+  fi
+fi
 
-# Create a directory to store the final output based on the OS
+# Auto icon discovery if not provided
+if [ -z "$ICON_FILE" ]; then
+  if [ "$OS" = "macos" ] && [ -f "src/icons/icon.icns" ]; then
+    ICON_FILE="src/icons/icon.icns"
+  elif [ -f "src/icons/icon.png" ]; then
+    ICON_FILE="src/icons/icon.png"
+  fi
+fi
+
+# Add default data folders if present (and not already provided)
+for cand in "${DEFAULT_DATA_CANDIDATES[@]}"; do
+  src="${cand%%:*}"
+  if [ -e "$src" ]; then
+    # Avoid duplicates
+    dup=0
+    for existing in "${ADD_DATA[@]}"; do
+      [ "$existing" = "$cand" ] && dup=1
+    done
+    [ "$dup" -eq 0 ] && ADD_DATA+=("$cand")
+  fi
+done
+
+# -----------------------------------------------------------------------------
+# Prepare output
+# -----------------------------------------------------------------------------
 FINAL_DIR="dist/$OS"
-if [ -d "$FINAL_DIR" ]; then
-    rm -rf "$FINAL_DIR"
+
+if [ "${CLEAN:-0}" -eq 1 ]; then
+  log "Cleaning build artifacts..."
+  rm -rf build dist *.spec || true
 fi
+
 mkdir -p "$FINAL_DIR"
 
-# Require python3.11 on PATH
-PYTHON_BIN="$(command -v python3.11 || true)"
-if [ -z "$PYTHON_BIN" ]; then
-  log "python3.11 not found. On macOS, run: brew install python@3.11"
-  exit 1
-fi
-
-# (Re)create venv if missing or wrong version
+# -----------------------------------------------------------------------------
+# Create/verify venv (Python 3.11)
+# -----------------------------------------------------------------------------
 NEED_RECREATE=0
 if [ ! -x "env/bin/python" ]; then
   NEED_RECREATE=1
@@ -68,330 +513,163 @@ else
 fi
 
 if [ "$NEED_RECREATE" -eq 1 ]; then
-    log "Creating fresh Python 3.11 virtual environment..."
-    rm -rf env
-    if [ "$USE_SYSTEM_PYQT" -eq 1 ]; then
-        # allow APT-installed PyQt5 to be visible in the venv
-        "$PYTHON_BIN" -m venv --system-site-packages env
-    else
-        "$PYTHON_BIN" -m venv env
-    fi
+  log "Creating fresh Python 3.11 virtual environment..."
+  rm -rf env
+  if [ "$USE_SYSTEM_PYQT" -eq 1 ]; then
+    "$PYTHON_BIN" -m venv --system-site-packages env
+  else
+    "$PYTHON_BIN" -m venv env
+  fi
 fi
 
-# Activate venv
 # shellcheck disable=SC1091
 source env/bin/activate
 
-# Double-check version (hard fail if not 3.11)
 ACTIVE_VER="$(python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
-if [ "$ACTIVE_VER" != "3.11" ]; then
-  log "Active Python is $ACTIVE_VER, expected 3.11. Aborting."
-  exit 1
-fi
+[ "$ACTIVE_VER" = "3.11" ] || die "Active Python is $ACTIVE_VER, expected 3.11"
 log "Using Python $(python -V)"
 
-# Ensure that pip is updated
 log "Updating pip..."
 python -m pip install --upgrade pip wheel
 
 log "Installing build dependencies..."
-# PyInstaller 6.9+ supports 3.11 well; lock to <7 to avoid future surprizes.
-# PyQt5 5.15.x is stable for Qt5 on macOS/Linux; lock <6.
 python -m pip install "pyinstaller>=6.9,<7" "sip>=6.9,<7"
 
+# Optional: system PyQt5 on Linux ARM (APT)
 if [ "$USE_SYSTEM_PYQT" -eq 1 ]; then
-    # Ensure system PyQt5 (and QtSvg) are present
-    if command -v apt-get >/dev/null 2>&1; then
-        log "Installing system PyQt5 via APT (requires sudo)..."
-        sudo apt-get update
-        sudo apt-get install -y python3-pyqt5 python3-pyqt5.qtsvg
-    else
-        log "ERROR: APT not found; cannot install system PyQt5. Install PyQt5 manually or switch to a distro with APT."
-        exit 1
-    fi
+  if [ "$OS" != "linux" ]; then
+    die "--system-pyqt is only supported on Linux"
+  fi
+  if command -v apt-get >/dev/null 2>&1; then
+    log "Installing system PyQt5 via APT (requires sudo)..."
+    sudo apt-get update
+    sudo apt-get install -y python3-pyqt5 python3-pyqt5.qtsvg
+  else
+    die "APT not found; cannot install system PyQt5. Install PyQt5 manually or omit --system-pyqt."
+  fi
+else
+  # Default: wheels
+  # (Only install PyQt5 if the project uses it; safe to install regardless.)
+  python -m pip install "PyQt5>=5.15,<6" || true
+fi
 
-    # ensure system dist-packages are visible inside the venv (Debian/RPi)
-    SYS_PYTHON="$(command -v python3)"
+# -----------------------------------------------------------------------------
+# Build
+# -----------------------------------------------------------------------------
+log "Building $APP_NAME for $OS ($PKG, $MODE) from entry: $ENTRY"
 
-    # Collect all system "dist-packages" dirs that might contain APT's PyQt5
-    SYS_DIST_DIRS="$("$SYS_PYTHON" - <<'PY'
-import site, sys
-paths=set()
+PYI_ARGS=(
+  --name "$APP_NAME"
+  --noconfirm
+)
 
-# Prefer entries that actually end with dist-packages
-for p in getattr(site, 'getsitepackages', lambda: [])() or []:
-    if p.endswith('dist-packages'):
-        paths.add(p)
+# Packaging
+if [ "$PKG" = "onefile" ]; then
+  PYI_ARGS+=(--onefile)
+else
+  PYI_ARGS+=(--onedir)
+fi
 
-up = getattr(site, 'getusersitepackages', lambda: None)()
-if up and str(up).endswith('dist-packages'):
-    paths.add(up)
+# Window mode
+if [ "$MODE" = "windowed" ]; then
+  PYI_ARGS+=(--windowed)
+fi
 
-# Common Debian/RPi locations
-for c in ('/usr/lib/python3/dist-packages', '/usr/local/lib/python3/dist-packages'):
-    paths.add(c)
+# Icon
+if [ -n "$ICON_FILE" ] && [ -f "$ICON_FILE" ]; then
+  PYI_ARGS+=(--icon "$ICON_FILE")
+fi
 
-print('\\n'.join(sorted(paths)))
-PY
-    )"
+# Hidden imports
+for hi in "${HIDDEN_IMPORTS[@]}"; do
+  [ -n "$hi" ] || continue
+  PYI_ARGS+=(--hidden-import "$hi")
+done
 
-    # Path to *this venv's* site-packages
-    VENV_SITE_PKGS="$(python - <<'PY'
-import sysconfig
-print(sysconfig.get_paths()["purelib"])
-PY
-    )"
+# Data
+# PyInstaller (on some versions) requires the equals form: --add-data=SRC:DST
+for ad in "${ADD_DATA[@]}"; do
+  # Allow config/CLI to provide either:
+  #   - SRC:DST
+  #   - --add-data=SRC:DST
+  #   - --add-data SRC:DST  (accidentally split by callers)
+  [ -n "$ad" ] || continue
+  if [ "$ad" = "--add-data" ]; then
+    # Skip stray flag (the next token would have been the value)
+    continue
+  fi
 
-    # Write a .pth pointing to each system dist-packages dir
-    : > "$VENV_SITE_PKGS/_system_dist_packages.pth"
-    while IFS= read -r d; do
-    [ -n "$d" ] && echo "$d" >> "$VENV_SITE_PKGS/_system_dist_packages.pth"
-    done <<< "$SYS_DIST_DIRS"
+  if [[ "$ad" == --add-data=* ]]; then
+    PYI_ARGS+=("$ad")
+  else
+    PYI_ARGS+=("--add-data=$ad")
+  fi
 
-    # Hard guarantee via sitecustomize.py
-    cat > "$VENV_SITE_PKGS/sitecustomize.py" <<'PY'
+done
+
+# Extra sanity checks (don’t fail builds for optional modules)
+log "Running a quick import sanity check (best-effort)..."
+python - <<'PY' || true
 import sys
-NEED = [
-    '/usr/lib/python3/dist-packages',
-    '/usr/local/lib/python3/dist-packages',
-]
-for p in NEED:
-    if p not in sys.path:
-        sys.path.append(p)
-PY
-
-    # Sanity check (now should succeed)
-    python - <<'PY'
-import sys
+print("Python:", sys.version)
 try:
-    import PyQt5, PyQt5.QtCore, PyQt5.QtWidgets, PyQt5.QtSvg
-    print("OK: System PyQt5 detected at:", PyQt5.__file__)
+    import PyInstaller  # noqa
+    print("PyInstaller OK")
 except Exception as e:
-    print("sys.path =", sys.path)
-    raise SystemExit(f"PyQt5 missing after setup: {e}")
-PY
-else
-    # Non-ARM / macOS etc: keep using PyPI wheels
-    python -m pip install "PyQt5>=5.15,<6"
-fi
-
-# Optional tools you had; keeping them only if you need them:
-python -m pip install PySide6-Addons
-# python -m pip install importlib PySide6-Addons
-
-# Check if the .spec file exists
-SPEC_FILE="$NAME.spec"
-ICON_FILE="src/icons/icon.icns"
-
-# Cleanup: Remove the leftover dist/$NAME directory on macOS
-log "Cleaning up..."
-if [ -d "dist/$NAME" ]; then
-    rm -rf "dist/$NAME"
-fi
-if [ -f "$SPEC_FILE" ]; then
-    rm -f "$SPEC_FILE"
-fi
-
-log "Verifying required PyQt5 modules are present..."
-python - <<'PY'
-from importlib.util import find_spec
-missing = [m for m in ("PyQt5", "PyQt5.QtSvg") if find_spec(m) is None]
-if missing:
-    raise SystemExit(f"Missing modules before build: {missing}")
-print("Qt check passed.")
+    print("PyInstaller import failed:", e)
 PY
 
-log ".spec file not found. Generating a new one with PyInstaller..."
-if [ "$OS" == "macos" ]; then
-    pyinstaller --windowed --name "$NAME" src/PyRDPConnect.py
-elif [ "$OS" == "linux" ]; then
-    # Linux build: bundle data and hidden import directly
-    pyinstaller \
-        --onefile \
-        --name "$NAME" \
-        --hidden-import PyQt5.QtSvg \
-        --add-data "src/app:app" \
-        --add-data "src/styles:styles" \
-        --add-data "src/icons:icons" \
-        --add-data "src/img:img" \
-        --add-data "src/freerdp/linux:freerdp/linux" \
-        src/PyRDPConnect.py
-fi
+# Print PyInstaller command for debug
+log "PyInstaller command:"
+printf '  %q ' pyinstaller "${PYI_ARGS[@]}" "$ENTRY"
+printf '\n'
 
-# Ensure the spec file now exists
-if [ ! -f "$SPEC_FILE" ]; then
-    log "Failed to create .spec file. Exiting."
-    exit 1
-fi
+# Execute PyInstaller
+pyinstaller "${PYI_ARGS[@]}" "$ENTRY"
 
-log "Generated .spec file: $SPEC_FILE"
+# -----------------------------------------------------------------------------
+# Collect output
+# -----------------------------------------------------------------------------
+if [ "$OS" = "macos" ]; then
+  # If entry builds a .app bundle, it'll appear under dist/<name>.app for onedir+windowed.
+  if [ -d "dist/$APP_NAME.app" ]; then
+    log "Moving .app to $FINAL_DIR/"
+    rm -rf "$FINAL_DIR/$APP_NAME.app" || true
+    mv "dist/$APP_NAME.app" "$FINAL_DIR/"
 
-# Update the .spec file to include the custom icon, data files, and hidden imports
-log "Updating the .spec file to include the custom icon, data files, and hidden imports..."
-if [ "$OS" == "macos" ]; then
-    sed -i '' "s|icon=None|icon='$ICON_FILE'|g" $SPEC_FILE
-    sed -i '' "/Analysis/s/(.*)/\0, hiddenimports=['PyQt5.QtSvg']/" $SPEC_FILE
-    sed -i '' "/a.datas +=/a \\
-        datas=[('src/styles', 'styles'), ('src/icons', 'icons'), ('src/app', 'app'), ('src/img', 'img')],
-    " $SPEC_FILE
-elif [ "$OS" == "linux" ]; then
-    sed -i "s|icon=None|icon='$ICON_FILE'|g" $SPEC_FILE
-    sed -i "/Analysis/s/(.*)/\0, hiddenimports=['PyQt5.QtSvg']/" $SPEC_FILE
-    sed -i "/a.datas +=/a \\
-        datas=[('src/styles', 'styles'), ('src/icons', 'icons'), ('src/app', 'app'), ('src/img', 'img')],
-    " $SPEC_FILE
-fi
-
-# Build the project with PyInstaller using the updated .spec file
-log "Building the project with PyInstaller..."
-pyinstaller --noconfirm $SPEC_FILE
-
-# Copy resources into the appropriate location
-if [ "$OS" == "macos" ]; then
-    APP_ROOT="dist/$NAME.app/Contents"
-    APP_MACOS="$APP_ROOT/MacOS"
-    APP_RES="$APP_ROOT/Resources"
-
-    log "Creating app resource directories..."
-    mkdir -p "$APP_RES/styles" "$APP_RES/img" "$APP_RES/icons"
-    cp -R src/styles/* "$APP_RES/styles/"
-    cp -R src/img/*    "$APP_RES/img/"
-    cp -R src/icons/*  "$APP_RES/icons/"
-
-    # ---- Bundle FreeRDP as PyRDPConnect expects (Resources/freerdp/macos/...) ----
-    VENDOR_DIR_SRC="src/freerdp/macos"
-    VENDOR_DIR_DST="$APP_RES/freerdp/macos"
-    mkdir -p "$VENDOR_DIR_DST"
-    log "Copying FreeRDP tree to Resources..."
-    rsync -a "$VENDOR_DIR_SRC/" "$VENDOR_DIR_DST/"
-
-    FREERDP_BIN="$VENDOR_DIR_DST/xfreerdp"
-    LIB_DIR="$VENDOR_DIR_DST/lib"
-    X11_DIR="$VENDOR_DIR_DST/x11"        # optional (if you vendored X11 libs)
-    PLUGINS_DIR="$VENDOR_DIR_DST/plugins" # optional
-
-    chmod +x "$FREERDP_BIN"
-
-    # ---- Patch rpaths + rewrite absolute Homebrew refs -> @rpath/<name> ----
-    BREW_PREFIX="$(brew --prefix 2>/dev/null || echo /opt/homebrew)"
-
-    add_rpath_if_missing() {
-      local bin="$1" r="$2"
-      if ! otool -l "$bin" | awk '/LC_RPATH/{getline; print $2}' | grep -qx "$r"; then
-        install_name_tool -add_rpath "$r" "$bin" 2>/dev/null || true
-      fi
-    }
-
-    # We want dyld to look inside ../lib and ../x11 relative to xfreerdp
-    add_rpath_if_missing "$FREERDP_BIN" "@loader_path/../lib"
-    if [ -d "$X11_DIR" ]; then
-      add_rpath_if_missing "$FREERDP_BIN" "@loader_path/../x11"
-    fi
-
-    # For each lib we ship, set id to @rpath/<base> and rewrite any Homebrew absolute deps to @rpath/<base>
-    patch_one_file() {
-      local file="$1"
-      # set its own id (for dylibs)
-      if [[ "$file" == *.dylib ]]; then
-        install_name_tool -id "@rpath/$(basename "$file")" "$file" 2>/dev/null || true
-      fi
-      # rewrite deps
-      otool -L "$file" | awk 'NR>1{print $1}' | while read -r dep; do
-        [ -z "$dep" ] && continue
-        case "$dep" in
-          /System/*|/usr/lib/*) continue ;;             # keep system libs
-        esac
-        if echo "$dep" | grep -Eq "^$BREW_PREFIX/(opt|Cellar)/"; then
-          base="$(basename "$dep")"
-          install_name_tool -change "$dep" "@rpath/$base" "$file" 2>/dev/null || true
-        fi
-      done
-    }
-
-    log "Patching bundled dylibs..."
-    if [ -d "$LIB_DIR" ]; then
-      find "$LIB_DIR" -type f -name "*.dylib" -print0 | while IFS= read -r -d '' f; do
-        chmod u+w "$f"
-        patch_one_file "$f"
-      done
-    fi
-    if [ -d "$X11_DIR" ]; then
-      find "$X11_DIR" -type f -name "*.dylib" -print0 | while IFS= read -r -d '' f; do
-        chmod u+w "$f"
-        patch_one_file "$f"
-      done
-    fi
-
-    log "Patching xfreerdp to use @rpath for Homebrew deps..."
-    patch_one_file "$FREERDP_BIN"
-
-    # Ad-hoc sign so dyld doesn’t complain
-    log "Ad-hoc codesigning bundled libs and app..."
-    if [ -d "$LIB_DIR" ]; then
-      find "$LIB_DIR" -type f -name "*.dylib" -exec codesign --force --timestamp=none -s - {} \;
-    fi
-    if [ -d "$X11_DIR" ]; then
-      find "$X11_DIR" -type f -name "*.dylib" -exec codesign --force --timestamp=none -s - {} \;
-    fi
-    [ -f "$FREERDP_BIN" ] && codesign --force --timestamp=none -s - "$FREERDP_BIN"
-    codesign --force --deep --timestamp=none -s - "dist/$NAME.app"
-
-    log "Verify xfreerdp linkage (should show @rpath -> ../lib and ../x11):"
-    otool -L "$FREERDP_BIN" | sed 's/^/  /'
-else
-    log "Moving the executable to the $FINAL_DIR directory..."
-    mv "dist/$NAME" "$FINAL_DIR/"
-fi
-
-# Verify the vendored version (macOS and linux)
-expect_major="3"   # adjust if you vendor 2.x
-if [ -x "${FREERDP_BIN:-}" ]; then
-    vend_ver="$("$FREERDP_BIN" +version 2>/dev/null | head -n1 | grep -Eo '[0-9]+\.[0-9]+(\.[0-9]+)?' || true)"
-    if [ -z "$vend_ver" ]; then
-        log "WARN: Could not detect vendored FreeRDP version from +version"
-    else
-        vmaj="${vend_ver%%.*}"
-        if [ "$vmaj" != "$expect_major" ]; then
-            log "ERROR: Vendored FreeRDP major version is $vmaj, expected $expect_major"
-            exit 1
-        fi
-        log "Vendored FreeRDP version: $vend_ver"
-    fi
-fi
-
-# On Linux, fail fast if vendored xfreerdp has unresolved deps
-if [ "$OS" = "linux" ] && [ -x "${FREERDP_BIN:-}" ]; then
-  if command -v ldd >/dev/null 2>&1; then
-    if ldd "$FREERDP_BIN" | grep -q "not found"; then
-      log "ERROR: Missing shared libraries for vendored xfreerdp:"
-      ldd "$FREERDP_BIN" | grep "not found" || true
-      exit 1
+    if [ "$MAKE_DMG" -eq 1 ]; then
+      log "Creating DMG..."
+      DMG_NAME="$FINAL_DIR/$APP_NAME.dmg"
+      hdiutil create "$DMG_NAME" -volname "$APP_NAME" -srcfolder "$FINAL_DIR/$APP_NAME.app" -ov -format UDZO
+      log "DMG created at $DMG_NAME"
     fi
   else
-    log "WARN: ldd not available; skipping shared-library check."
+    # Non-windowed or non-app outputs (e.g., console onedir)
+    log "Moving build output to $FINAL_DIR/"
+    rm -rf "$FINAL_DIR/$APP_NAME" || true
+    mv "dist/$APP_NAME" "$FINAL_DIR/"
   fi
+else
+  log "Moving build output to $FINAL_DIR/"
+  rm -rf "$FINAL_DIR/$APP_NAME" || true
+  mv "dist/$APP_NAME" "$FINAL_DIR/"
 fi
 
-# Move the built application or executable to the appropriate directory
-if [ "$OS" == "macos" ]; then
-    log "Moving the .app bundle to the $FINAL_DIR directory..."
-    mv "dist/$NAME.app" "$FINAL_DIR/"
+log "Build completed successfully. Output: $FINAL_DIR"
 
-    # Create a DMG image
-    log "Creating a DMG image for macOS..."
-    DMG_NAME="$FINAL_DIR/$NAME.dmg"
-    hdiutil create "$DMG_NAME" -volname "$NAME" -srcfolder "$FINAL_DIR/$NAME.app" -ov -format UDZO
-
-    log "DMG image created at $DMG_NAME"
-fi
-
-# Cleanup: Remove the leftover dist/$NAME directory on macOS
-if [ -d "dist/$NAME" ]; then
-    log "Cleaning up the dist directory..."
-    rm -rf "dist/$NAME"
-fi
-
-log "Build completed successfully."
-
-# Deactivate the virtual environment
 deactivate
+
+# -----------------------------------------------------------------------------
+# Example build.cfg
+# -----------------------------------------------------------------------------
+# NAME=Replicator
+# ENTRY=src/main.py
+# MODE=console            # or windowed
+# PKG=auto                # auto|onefile|onedir
+# ICON=src/icons/icon.icns
+# PYTHON=python3.11
+# SYSTEM_PYQT=0           # 1 on Linux ARM if you want APT PyQt5
+# DMG=0                   # 1 on macOS to create a DMG
+# CLEAN=1
+# ADD_DATA=src/app:app;src/styles:styles;src/icons:icons
+# HIDDEN_IMPORTS=PyQt5.QtSvg;some_package.some_module

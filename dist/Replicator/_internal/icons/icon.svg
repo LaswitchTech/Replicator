@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 256">
+    <defs>
+        <!-- Left folder gradient -->
+        <linearGradient id="blueFolder" x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" stop-color="#2267A0"/>
+            <stop offset="100%" stop-color="#289cdf"/>
+        </linearGradient>
+
+        <!-- Right folder gradient -->
+        <linearGradient id="greyFolder" x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" stop-color="#8a95a0"/>
+            <stop offset="100%" stop-color="#e0e7ee"/>
+        </linearGradient>
+
+        <!-- Arrow gradient -->
+        <linearGradient id="arrows" x1="0%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" stop-color="#3b7bc4"/>
+            <stop offset="100%" stop-color="#21538C"/>
+        </linearGradient>
+
+        <!-- Single combined bidirectional arrow (double-headed). -->
+        <!-- Tips overlap folders slightly; body stays in the gap. -->
+        <path id="doubleArrow" d="M 218 128 L 238 108 L 238 120 L 274 120 L 274 108 L 294 128 L 274 148 L 274 136 L 238 136 L 238 148 Z" />
+
+        <!-- Mask to create a TRANSPARENT halo (knockout) around the arrow so it doesn't visually merge into folders. -->
+        <mask id="foldersMask">
+            <!-- Show everything by default -->
+            <rect x="0" y="0" width="512" height="256" fill="white"/>
+            <!-- Hide (cut out) a padded version of the arrow from the folders -->
+            <use href="#doubleArrow" fill="black" stroke="black" stroke-width="18" stroke-linejoin="round"/>
+        </mask>
+    </defs>
+
+    <!-- Folders group (masked so there is a transparent border around the arrow) -->
+    <g mask="url(#foldersMask)">
+        <!-- Left Folder (shifted left to create a gap) -->
+        <g transform="translate(15,16) scale(1.125,1.125)">
+            <path fill="url(#blueFolder)" d="M197.951,77.097l-16.024,78.532c-1.222,5.987-6.488,10.288-12.599,10.288H20.196c-8.135,0-14.225-7.459-12.599-15.429 L21.94,80.197c1.29-6.32,6.849-10.859,13.299-10.859h150.14h6.237c3.068,0,5.558,2.11,6.266,4.856 C198.117,75.109,198.155,76.094,197.951,77.097z M12.142,78.198c2.23-10.928,11.943-18.86,23.097-18.86h150.076 c-0.6-5.713-5.444-10.181-11.314-10.181H94.819c-1.605-9.628-9.995-16.989-20.07-16.989H13.35C5.989,32.167,0,38.156,0,45.517 v92.186L12.142,78.198z"/>
+        </g>
+
+        <!-- Right Folder (mirrored, shifted right to create a gap) -->
+        <g transform="translate(498,16) scale(-1.125,1.125)">
+            <path fill="url(#greyFolder)" d="M197.951,77.097l-16.024,78.532c-1.222,5.987-6.488,10.288-12.599,10.288H20.196c-8.135,0-14.225-7.459-12.599-15.429 L21.94,80.197c1.29-6.32,6.849-10.859,13.299-10.859h150.14h6.237c3.068,0,5.558,2.11,6.266,4.856 C198.117,75.109,198.155,76.094,197.951,77.097z M12.142,78.198c2.23-10.928,11.943-18.86,23.097-18.86h150.076 c-0.6-5.713-5.444-10.181-11.314-10.181H94.819c-1.605-9.628-9.995-16.989-20.07-16.989H13.35C5.989,32.167,0,38.156,0,45.517 v92.186L12.142,78.198z"/>
+        </g>
+    </g>
+
+    <!-- Arrow on top (single combined arrow). -->
+    <g>
+        <use href="#doubleArrow" fill="url(#arrows)"/>
+    </g>
+</svg>

@@ -28,6 +28,9 @@ runtime
 /tmp/
 /data/
 
+# Exclusions for Python projects
+!build.cfg
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

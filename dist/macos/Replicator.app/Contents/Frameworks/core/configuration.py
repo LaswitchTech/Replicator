@@ -1,0 +1,1 @@
+../../Resources/core/configuration.py
