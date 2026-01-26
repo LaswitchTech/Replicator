@@ -1,1 +1,0 @@
-../../Resources/core/__init__.py

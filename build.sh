@@ -157,7 +157,10 @@ MAKE_DMG=0
 ICON_FILE=""
 
 # Repeatable arrays
+declare -a ADD_DATA
 ADD_DATA=()
+
+declare -a HIDDEN_IMPORTS
 HIDDEN_IMPORTS=()
 
 # Common default data folders (only add if they exist)
@@ -386,8 +389,8 @@ CLI_PYTHON_BIN="$PYTHON_BIN"
 CLI_USE_SYSTEM_PYQT="$USE_SYSTEM_PYQT"
 CLI_MAKE_DMG="$MAKE_DMG"
 CLI_CLEAN="${CLEAN:-0}"
-CLI_ADD_DATA=("${ADD_DATA[@]}")
-CLI_HIDDEN_IMPORTS=("${HIDDEN_IMPORTS[@]}")
+CLI_ADD_DATA=("${ADD_DATA[@]+${ADD_DATA[@]}}")
+CLI_HIDDEN_IMPORTS=("${HIDDEN_IMPORTS[@]+${HIDDEN_IMPORTS[@]}}")
 
 # Determine config path
 if [ -z "$CFG_FILE" ] && [ -f "build.cfg" ]; then
@@ -480,7 +483,7 @@ for cand in "${DEFAULT_DATA_CANDIDATES[@]}"; do
   if [ -e "$src" ]; then
     # Avoid duplicates
     dup=0
-    for existing in "${ADD_DATA[@]}"; do
+    for existing in "${ADD_DATA[@]+${ADD_DATA[@]}}"; do
       [ "$existing" = "$cand" ] && dup=1
     done
     [ "$dup" -eq 0 ] && ADD_DATA+=("$cand")
@@ -581,14 +584,14 @@ if [ -n "$ICON_FILE" ] && [ -f "$ICON_FILE" ]; then
 fi
 
 # Hidden imports
-for hi in "${HIDDEN_IMPORTS[@]}"; do
+for hi in "${HIDDEN_IMPORTS[@]+${HIDDEN_IMPORTS[@]}}"; do
   [ -n "$hi" ] || continue
   PYI_ARGS+=(--hidden-import "$hi")
 done
 
 # Data
 # PyInstaller (on some versions) requires the equals form: --add-data=SRC:DST
-for ad in "${ADD_DATA[@]}"; do
+for ad in "${ADD_DATA[@]+${ADD_DATA[@]}}"; do
   # Allow config/CLI to provide either:
   #   - SRC:DST
   #   - --add-data=SRC:DST
