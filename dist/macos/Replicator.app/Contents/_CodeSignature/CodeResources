@@ -362,7 +362,7 @@
 		</data>
 		<key>Resources/base_library.zip</key>
 		<data>
-		ds9Tg3PGVEWg+6icS9zh2b3R4qI=
+		h8eOHFo0PO2FD4ypFRj7jdPSCqg=
 		</data>
 		<key>Resources/core/.editorconfig</key>
 		<data>
@@ -491,6 +491,10 @@
 		<key>Resources/core/application.py</key>
 		<data>
 		oq8hshixVtS3ycXhmWNL52FmaG8=
+		</data>
+		<key>Resources/core/build.sh</key>
+		<data>
+		JloIhKcfGga0GCyC2R0bzXjCvXc=
 		</data>
 		<key>Resources/core/bundle.sh</key>
 		<data>
@@ -742,7 +746,7 @@
 		</data>
 		<key>Resources/core/service.py</key>
 		<data>
-		J7ymxlQzWvB/cd9LjoSIiKjR6Ow=
+		hcVB2dgsNjjNMV3XiG1d9Dx8EJ4=
 		</data>
 		<key>Resources/core/styles/style.css</key>
 		<data>
@@ -751,6 +755,10 @@
 		<key>Resources/core/ui.py</key>
 		<data>
 		nWXYVuUIybrpeYkSY0Pz26BFgIU=
+		</data>
+		<key>Resources/core/update.sh</key>
+		<data>
+		/FK0L2hD8TgmZm/H0dWwdK1+JaE=
 		</data>
 		<key>Resources/icon.icns</key>
 		<data>
@@ -2422,7 +2430,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			YDUAHrCYLm8GAryQS5a3taqZ+vMnBOiRVW2t3/hQHQc=
+			lR7rtuUtwJYtEAl66tCh8h0l7F4hQJ3R53KBLX+A70M=
 			</data>
 		</dict>
 		<key>Resources/core/.editorconfig</key>
@@ -2647,6 +2655,13 @@
 			<key>hash2</key>
 			<data>
 			oFdYS10yOvb4cwVRZMG2VUIoPsrwMl5ExdptxBg8qug=
+			</data>
+		</dict>
+		<key>Resources/core/build.sh</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			6Crtsmg5kJbpFWLxLHWYM5SbJRa3tjH/bD9oxy2z/UI=
 			</data>
 		</dict>
 		<key>Resources/core/bundle.sh</key>
@@ -3087,7 +3102,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			lqo9CxD+8V/6un7MibANlp+cPEp4KPaBNc7OHC8MiZw=
+			qsct7Khom3dQuwcsaFJrX8h4k2vU1hI0MMj6Eel8kh4=
 			</data>
 		</dict>
 		<key>Resources/core/styles/style.css</key>
@@ -3102,6 +3117,13 @@
 			<key>hash2</key>
 			<data>
 			AMU2ewv+s4v01eAvVCp+7Ay0RzR3uBJ/HUgA6FJiwjM=
+			</data>
+		</dict>
+		<key>Resources/core/update.sh</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			mRjJbMVVN1xuiopjFUuA5KTVOLcLwW2dWF+z+utMK+g=
 			</data>
 		</dict>
 		<key>Resources/icon.icns</key>
