@@ -27,7 +27,7 @@ runtime
 # Unique Directories
 /tmp/
 /data/
-/dist/
+/dist/Replicator/
 !/dist/macos/
 !/dist/linux/
 !/dist/windows/
