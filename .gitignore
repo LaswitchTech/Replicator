@@ -27,6 +27,10 @@ runtime
 # Unique Directories
 /tmp/
 /data/
+/dist/
+!/dist/macos
+!/dist/linux
+!/dist/windows
 
 # Exclusions for Python projects
 !build.cfg
