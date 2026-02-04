@@ -106,8 +106,8 @@ def _parse_smb_location(loc: str) -> tuple[str, str]:
     """Parse SMB location into (host, remote).
 
     Accepts forms:
-      - \\host\Share
-      - \\host\Share\dir\sub
+      - \\host\\Share
+      - \\host\\Share\\dir\\sub
       - //host/Share/dir
       - host/Share/dir
     Returns:
