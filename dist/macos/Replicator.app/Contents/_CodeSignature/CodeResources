@@ -362,7 +362,7 @@
 		</data>
 		<key>Resources/base_library.zip</key>
 		<data>
-		lApS28Aj8rq2dXscljb9Wv5PkVI=
+		kG1V3UtA5q2wFjzf7H1tGo0RL10=
 		</data>
 		<key>Resources/core/.editorconfig</key>
 		<data>
@@ -746,7 +746,7 @@
 		</data>
 		<key>Resources/core/service.py</key>
 		<data>
-		4LTO7LLbHl+x3Lxflb8s2zTxIKY=
+		lz98j2uBBxpyKrFKuy3aGjYt6Sc=
 		</data>
 		<key>Resources/core/styles/style.css</key>
 		<data>
@@ -1391,6 +1391,15 @@
 			</data>
 			<key>requirement</key>
 			<string>cdhash H"dd978a3880dcbe3ace21fd15cce321fd295f4ba6"</string>
+		</dict>
+		<key>Frameworks/python3__dot__11/lib-dynload/_ctypes.cpython-311-darwin.so</key>
+		<dict>
+			<key>cdhash</key>
+			<data>
+			/Z9MI/tiQtBfSBmEUJtCAusWCHc=
+			</data>
+			<key>requirement</key>
+			<string>cdhash H"fd9f4c23fb6242d05f481984509b4202eb160877"</string>
 		</dict>
 		<key>Frameworks/python3__dot__11/lib-dynload/_datetime.cpython-311-darwin.so</key>
 		<dict>
@@ -2430,7 +2439,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			vAXP5tbFDttGqDVkU8lwIdzmPrlyjA8FyumdZR8ov6g=
+			/ewymeGasi8HC26OogTW2X6kAImN9TxA2FWt2UejZNI=
 			</data>
 		</dict>
 		<key>Resources/core/.editorconfig</key>
@@ -3102,7 +3111,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			MNY4oxW6u2yLGh9n/Jojs+2vx2QC/Gq4wv2sgL1YZS4=
+			M6s+z/mc0PVLslrSA6HJbhc1rDeZWFedQrSTUeZ9wIw=
 			</data>
 		</dict>
 		<key>Resources/core/styles/style.css</key>
