@@ -52,9 +52,17 @@ REM Install minimal deps (idempotent)
 echo Installing minimal runtime deps (PyQt5)...
 "%VENV_PY%" -m pip install "PyQt5>=5.15,<6" >nul
 
-REM Run the app entry in console mode
+REM Prefer the built console companion if available
+if exist "%SCRIPT_DIR%dist\windows\Replicator-cli.exe" (
+  "%SCRIPT_DIR%dist\windows\Replicator-cli.exe" %*
+  endlocal
+  exit /b %ERRORLEVEL%
+)
+
+REM Fallback: Run the source entry in console mode (dev checkout)
 if not exist "%SCRIPT_DIR%src\main.py" (
   echo ERROR: Entry not found: %SCRIPT_DIR%src\main.py
+  echo NOTE: Replicator-cli.exe not found at %SCRIPT_DIR%dist\windows\Replicator-cli.exe
   exit /b 1
 )
 

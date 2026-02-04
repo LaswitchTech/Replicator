@@ -817,24 +817,76 @@ VBS
 
   cat >"$out_dir/cli.bat" <<'BAT'
 @echo off
-setlocal
+setlocal EnableExtensions EnableDelayedExpansion
 
+REM ---------------------------------------------------------------------------
 REM Replicator CLI launcher (Windows)
-REM - Runs the built EXE if present
-REM - If not present, asks the user to run ./cli.sh from Git Bash
+REM - Ensures a local venv exists (.venv)
+REM - Installs minimal runtime deps (PyQt5)
+REM - Runs src\main.py with a visible console
+REM
+REM Note: If you double-click this file, the console may flash and close.
+REM       Run it from an existing Command Prompt for persistent output.
+REM ---------------------------------------------------------------------------
 
 set "SCRIPT_DIR=%~dp0"
+set "VENV_DIR=%SCRIPT_DIR%.venv"
+set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
 
-if exist "%SCRIPT_DIR%dist\\windows\\Replicator.exe" (
-  "%SCRIPT_DIR%dist\\windows\\Replicator.exe" %*
+REM Prefer Windows Python Launcher
+set "PY_CMD="
+set "PY_ARGS="
+where py >nul 2>&1
+if %ERRORLEVEL%==0 (
+  set "PY_CMD=py"
+  set "PY_ARGS=-3.11"
+) else (
+  where python >nul 2>&1
+  if %ERRORLEVEL%==0 (
+    set "PY_CMD=python"
+    set "PY_ARGS="
+  )
+)
+
+if "%PY_CMD%"=="" (
+  echo ERROR: Python not found. Install Python 3.11+ and ensure either `py` or `python` is available in PATH.
+  exit /b 1
+)
+
+REM Create venv if missing
+if not exist "%VENV_PY%" (
+  echo Creating virtualenv: %VENV_DIR%
+  %PY_CMD% %PY_ARGS% -m venv "%VENV_DIR%"
+  if %ERRORLEVEL% NEQ 0 (
+    echo ERROR: Failed to create virtualenv.
+    exit /b %ERRORLEVEL%
+  )
+)
+
+REM Upgrade pip/wheel
+"%VENV_PY%" -m pip install --upgrade pip wheel >nul
+
+REM Install minimal deps (idempotent)
+echo Installing minimal runtime deps (PyQt5)...
+"%VENV_PY%" -m pip install "PyQt5>=5.15,<6" >nul
+
+REM Prefer the built console companion if available
+if exist "%SCRIPT_DIR%dist\windows\Replicator-cli.exe" (
+  "%SCRIPT_DIR%dist\windows\Replicator-cli.exe" %*
   endlocal
   exit /b %ERRORLEVEL%
 )
 
-echo Replicator.exe not found at "%SCRIPT_DIR%dist\\windows\\Replicator.exe".
-echo If you are in a dev checkout, use Git Bash and run: ./cli.sh --help
+REM Fallback: Run the source entry in console mode (dev checkout)
+if not exist "%SCRIPT_DIR%src\main.py" (
+  echo ERROR: Entry not found: %SCRIPT_DIR%src\main.py
+  echo NOTE: Replicator-cli.exe not found at %SCRIPT_DIR%dist\windows\Replicator-cli.exe
+  exit /b 1
+)
+
+"%VENV_PY%" "%SCRIPT_DIR%src\main.py" %*
 endlocal
-exit /b 1
+exit /b %ERRORLEVEL%
 BAT
 }
 
@@ -1137,8 +1189,45 @@ log "PyInstaller command:"
 printf '  %q ' pyinstaller "${PYI_ARGS[@]}" "$ENTRY"
 printf '\n'
 
+
 # Execute PyInstaller
 pyinstaller "${PYI_ARGS[@]}" "$ENTRY"
+
+# ---------------------------------------------------------------------------
+# Windows: also build a console-subsystem companion EXE for CLI usage.
+# - Keeps the main EXE as --windowed (nice for double-click)
+# - Produces <APP_NAME>-cli.exe without --windowed so stdout/stderr work in terminals
+# ---------------------------------------------------------------------------
+if [ "$OS" = "windows" ] && [ "$MODE" = "windowed" ]; then
+  CLI_APP_NAME="${APP_NAME}-cli"
+
+  log "Building $CLI_APP_NAME for $OS ($PKG, console) from entry: $ENTRY"
+
+  # Copy args and adjust for console build
+  PYI_CLI_ARGS=("${PYI_ARGS[@]}")
+
+  # Replace --name value
+  for i in "${!PYI_CLI_ARGS[@]}"; do
+    if [ "${PYI_CLI_ARGS[$i]}" = "--name" ]; then
+      PYI_CLI_ARGS[$((i+1))]="$CLI_APP_NAME"
+    fi
+  done
+
+  # Remove --windowed if present
+  PYI_CLI_ARGS_STRIPPED=()
+  for a in "${PYI_CLI_ARGS[@]}"; do
+    if [ "$a" = "--windowed" ]; then
+      continue
+    fi
+    PYI_CLI_ARGS_STRIPPED+=("$a")
+  done
+
+  log "PyInstaller command (CLI companion):"
+  printf '  %q ' pyinstaller "${PYI_CLI_ARGS_STRIPPED[@]}" "$ENTRY"
+  printf '\n'
+
+  pyinstaller "${PYI_CLI_ARGS_STRIPPED[@]}" "$ENTRY"
+fi
 
 # -----------------------------------------------------------------------------
 # Collect output
@@ -1164,8 +1253,41 @@ if [ "$OS" = "macos" ]; then
   fi
 else
   log "Moving build output to $FINAL_DIR/"
-  rm -rf "$FINAL_DIR/$APP_NAME" || true
-  mv "dist/$APP_NAME" "$FINAL_DIR/"
+
+  # Windows onefile creates dist/<name>.exe; onedir creates dist/<name>/
+  # Move all matching outputs for this app (and its -cli companion).
+  if [ "$OS" = "windows" ]; then
+    # Clean old outputs
+    rm -f "$FINAL_DIR/${APP_NAME}.exe" "$FINAL_DIR/${APP_NAME}-cli.exe" || true
+    rm -rf "$FINAL_DIR/$APP_NAME" "$FINAL_DIR/${APP_NAME}-cli" || true
+
+    # Prefer moving EXEs if they exist
+    if [ -f "dist/${APP_NAME}.exe" ]; then
+      mv "dist/${APP_NAME}.exe" "$FINAL_DIR/"
+    elif [ -f "dist/$APP_NAME" ]; then
+      mv "dist/$APP_NAME" "$FINAL_DIR/" || true
+    fi
+
+    if [ -f "dist/${APP_NAME}-cli.exe" ]; then
+      mv "dist/${APP_NAME}-cli.exe" "$FINAL_DIR/"
+    elif [ -f "dist/${APP_NAME}-cli" ]; then
+      mv "dist/${APP_NAME}-cli" "$FINAL_DIR/" || true
+    fi
+
+    # If onedir outputs were produced, move them too
+    if [ -d "dist/$APP_NAME" ]; then
+      rm -rf "$FINAL_DIR/$APP_NAME" || true
+      mv "dist/$APP_NAME" "$FINAL_DIR/"
+    fi
+    if [ -d "dist/${APP_NAME}-cli" ]; then
+      rm -rf "$FINAL_DIR/${APP_NAME}-cli" || true
+      mv "dist/${APP_NAME}-cli" "$FINAL_DIR/"
+    fi
+
+  else
+    rm -rf "$FINAL_DIR/$APP_NAME" || true
+    mv "dist/$APP_NAME" "$FINAL_DIR/"
+  fi
 fi
 
 log "Build completed successfully. Output: $FINAL_DIR"
@@ -1216,6 +1338,23 @@ URL
       log "Windows shortcut created: $FINAL_DIR/$APP_NAME.url"
     else
       log "WARN: Could not create Windows shortcut (cscript not available)"
+    fi
+  fi
+
+  # Optional: create a shortcut for the CLI companion
+  CLI_EXE_PATH="$(pwd)/$FINAL_DIR/${APP_NAME}-cli.exe"
+  CLI_LNK_PATH="$(pwd)/$FINAL_DIR/${APP_NAME}-cli.lnk"
+  if [ -f "$CLI_EXE_PATH" ]; then
+    if command -v cscript >/dev/null 2>&1; then
+      cscript //nologo "build/make_shortcut.vbs" "$(cygpath -w "$CLI_EXE_PATH" 2>/dev/null || echo "$CLI_EXE_PATH")" "$(cygpath -w "$CLI_LNK_PATH" 2>/dev/null || echo "$CLI_LNK_PATH")" >/dev/null 2>&1 || true
+    fi
+    if [ ! -f "$CLI_LNK_PATH" ]; then
+      cat >"$FINAL_DIR/${APP_NAME}-cli.url" <<URL
+[InternetShortcut]
+URL=file:///${CLI_EXE_PATH}
+IconFile=${CLI_EXE_PATH}
+IconIndex=0
+URL
     fi
   fi
 fi
