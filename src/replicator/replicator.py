@@ -890,6 +890,7 @@ class Replicator(QMainWindow):
 
         central = QWidget(self)
         self.setCentralWidget(central)
+        central.setStyleSheet("background-color: #212121;")
         root = QVBoxLayout(central)
         root.setContentsMargins(16, 16, 16, 16)
         root.setSpacing(12)
