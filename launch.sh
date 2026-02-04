@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Replicator dev/run wrapper
+# Replicator dev launcher (Git Bash compatible)
 # - Creates a virtualenv if missing
 # - Installs runtime deps (prefers requirements.txt if present)
 # - Runs src/main.py
