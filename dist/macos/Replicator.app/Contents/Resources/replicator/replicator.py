@@ -106,8 +106,8 @@ def _parse_smb_location(loc: str) -> tuple[str, str]:
     """Parse SMB location into (host, remote).
 
     Accepts forms:
-      - \\host\Share
-      - \\host\Share\dir\sub
+      - \\host\\Share
+      - \\host\\Share\\dir\\sub
       - //host/Share/dir
       - host/Share/dir
     Returns:
@@ -890,6 +890,7 @@ class Replicator(QMainWindow):
 
         central = QWidget(self)
         self.setCentralWidget(central)
+        central.setStyleSheet("background-color: #212121;")
         root = QVBoxLayout(central)
         root.setContentsMargins(16, 16, 16, 16)
         root.setSpacing(12)

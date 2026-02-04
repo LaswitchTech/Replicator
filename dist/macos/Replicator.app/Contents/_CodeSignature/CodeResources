@@ -362,7 +362,7 @@
 		</data>
 		<key>Resources/base_library.zip</key>
 		<data>
-		S9sWCH4a6DJWdTfjk4yC10GHoHk=
+		RmerjubHR0EeCKhicM61IiusGRI=
 		</data>
 		<key>Resources/core/.editorconfig</key>
 		<data>
@@ -458,7 +458,7 @@
 		</data>
 		<key>Resources/core/__pycache__/helper.cpython-311.pyc</key>
 		<data>
-		NYjlsC9mLpqwl7DqJMJmAzGV/MY=
+		z6hwdrut5R+PzJ+pkPGPmomjm2s=
 		</data>
 		<key>Resources/core/__pycache__/helper.cpython-312.pyc</key>
 		<data>
@@ -494,7 +494,7 @@
 		</data>
 		<key>Resources/core/build.sh</key>
 		<data>
-		++Fhk/TcyiYR8ld/GG+QJIczk88=
+		IghAMON9maRMmrEPkvPfJK9NmtY=
 		</data>
 		<key>Resources/core/bundle.sh</key>
 		<data>
@@ -566,7 +566,7 @@
 		</data>
 		<key>Resources/core/helper.py</key>
 		<data>
-		vBcw1mSZt50jnP+OXOpdgJZdEiw=
+		Yki8zuznOwafPqsML+mDFXGbe58=
 		</data>
 		<key>Resources/core/icons/activity.svg</key>
 		<data>
@@ -806,7 +806,7 @@
 		</data>
 		<key>Resources/replicator/__pycache__/replicator.cpython-311.pyc</key>
 		<data>
-		u2lpke6WARbM40DHmC7Op3PqQ8k=
+		ScS55smvRV9ceuEGNTHLfHC2Hj0=
 		</data>
 		<key>Resources/replicator/__pycache__/replicator.cpython-312.pyc</key>
 		<data>
@@ -830,7 +830,7 @@
 		</data>
 		<key>Resources/replicator/replicator.py</key>
 		<data>
-		snVJQF522LPaJYob5RuJodVC4TU=
+		5BisP7SMZUNuvuTI5ZiYnmxbW48=
 		</data>
 		<key>Resources/replicator/ui.py</key>
 		<data>
@@ -2430,7 +2430,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			q497teJvHG1iI03GD3rGiZleybj5Mxvyn7s2iTewXtA=
+			L1HZZkNDlpfDkysSe0qqC0/KCH/qIo6N2w+RWML8FIg=
 			</data>
 		</dict>
 		<key>Resources/core/.editorconfig</key>
@@ -2598,7 +2598,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			TrY1yykFMPoqlRHl/pIua/r2a8vClsAj8szJXyp9OpU=
+			yC/njRsfc7hdu4r/UVY1+6lUuVms9dIgy6q8BFqIkpo=
 			</data>
 		</dict>
 		<key>Resources/core/__pycache__/helper.cpython-312.pyc</key>
@@ -2661,7 +2661,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			yY+6HyHAptDIANWrLGc71k5DBi8YdeQ5kfD5B93efUg=
+			6yH8UALzRj4dlzn2CB1bAyKpVEniQcVegni/81tX8TE=
 			</data>
 		</dict>
 		<key>Resources/core/bundle.sh</key>
@@ -2787,7 +2787,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			8gE3lM/7fgfUpvcz3JIBsxwuflkYGweGCs8mZT3q6gY=
+			xvmkG9RXguDY+m0cAkS1EYSkHgz1Y/VKeU0F3tXoI2Y=
 			</data>
 		</dict>
 		<key>Resources/core/icons/activity.svg</key>
@@ -3237,7 +3237,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			1MYmj8rZztg+ZcOip9zjw8x7HzF1rF33GUGaozTwx4A=
+			GYYIx88UmffBO2ThBg6RrpE23c0FbnV7CBV6UcK1olo=
 			</data>
 		</dict>
 		<key>Resources/replicator/__pycache__/replicator.cpython-312.pyc</key>
@@ -3279,7 +3279,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			5Y9pTAtIHgKFMpCGBUPUwzl8Jb6zNsu7LbPugTpLMf4=
+			jfhqPwGbundwGe5yxOGZPb2xKNAKl8LQVq4BM6417Oc=
 			</data>
 		</dict>
 		<key>Resources/replicator/ui.py</key>
