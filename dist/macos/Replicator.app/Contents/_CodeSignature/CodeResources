@@ -362,7 +362,7 @@
 		</data>
 		<key>Resources/base_library.zip</key>
 		<data>
-		9VQViQWrRlhbSvv2IHaInUaYu10=
+		5nDShFymWXniBj77FYnnkzKnCSE=
 		</data>
 		<key>Resources/core/.editorconfig</key>
 		<data>
@@ -450,7 +450,7 @@
 		</data>
 		<key>Resources/core/__pycache__/configuration.cpython-311.pyc</key>
 		<data>
-		vWF5CIF/oJaGc0Ry3gOoOfGfazg=
+		K6SabsH7w7fxj63RoyM0WAfrA1k=
 		</data>
 		<key>Resources/core/__pycache__/configuration.cpython-312.pyc</key>
 		<data>
@@ -458,7 +458,7 @@
 		</data>
 		<key>Resources/core/__pycache__/helper.cpython-311.pyc</key>
 		<data>
-		z6hwdrut5R+PzJ+pkPGPmomjm2s=
+		kuNxNPuLEiGqdoUxNaZ5Fcfvpb4=
 		</data>
 		<key>Resources/core/__pycache__/helper.cpython-312.pyc</key>
 		<data>
@@ -466,7 +466,7 @@
 		</data>
 		<key>Resources/core/__pycache__/log.cpython-311.pyc</key>
 		<data>
-		00DVSygfQgTnAf/7swtM5yIfNuc=
+		eAofXzXoAu/tdWVlQG5flABVgJU=
 		</data>
 		<key>Resources/core/__pycache__/log.cpython-312.pyc</key>
 		<data>
@@ -474,7 +474,7 @@
 		</data>
 		<key>Resources/core/__pycache__/service.cpython-311.pyc</key>
 		<data>
-		7s9tUCLb6d6mzMrW/e0Zxo93jEM=
+		3Nurpeti9RkH98ZXjkLtVAGOVqY=
 		</data>
 		<key>Resources/core/__pycache__/service.cpython-312.pyc</key>
 		<data>
@@ -566,7 +566,7 @@
 		</data>
 		<key>Resources/core/helper.py</key>
 		<data>
-		dWw4J3XO5liMXphOc0JKjNH3v9A=
+		p1D4iZS3LtjbaNp0Gbl3TtQHkBI=
 		</data>
 		<key>Resources/core/icons/activity.svg</key>
 		<data>
@@ -806,7 +806,7 @@
 		</data>
 		<key>Resources/replicator/__pycache__/replicator.cpython-311.pyc</key>
 		<data>
-		+T3OFZnikPfGdQgnEmd5GeKwh1o=
+		OYr11YZUNdsSNvserOAVMhL+794=
 		</data>
 		<key>Resources/replicator/__pycache__/replicator.cpython-312.pyc</key>
 		<data>
@@ -2439,7 +2439,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			DcmT72Hfsdyg5C6ufZ94d5O97HYWh0xYot3HmSpAezw=
+			BWOFudmUyWmj5ZZ85vd4UEl5pF3nP22HvLZaptbfV6o=
 			</data>
 		</dict>
 		<key>Resources/core/.editorconfig</key>
@@ -2593,7 +2593,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			x4mNVhP7BXCDoRmdFQ+5WTsWzAiWc9AfHDC+/la5AlQ=
+			4OAzlZIvmIGgLqgqYPJEoSFjKpo/OXMYorKRoKqUQWA=
 			</data>
 		</dict>
 		<key>Resources/core/__pycache__/configuration.cpython-312.pyc</key>
@@ -2607,7 +2607,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			yC/njRsfc7hdu4r/UVY1+6lUuVms9dIgy6q8BFqIkpo=
+			ibfi7J9FXPefaEtbISlmUkz1BCx+CNzkqoxFU+C1zN8=
 			</data>
 		</dict>
 		<key>Resources/core/__pycache__/helper.cpython-312.pyc</key>
@@ -2621,7 +2621,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			OJQJSWTJA4QYI7okvXuO/aErLNDAxQcYnegMhz21joo=
+			zhhkshQxjHS8kz0z7bKnMviHAF/hwx4MckmVjpZFFR4=
 			</data>
 		</dict>
 		<key>Resources/core/__pycache__/log.cpython-312.pyc</key>
@@ -2635,7 +2635,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			IXFOi5/WwtJeXpvtWEM7+3+uECkHJHGK1K9jF8ilA8c=
+			hZOLoIjKqnU4JB8TisBF+SF9SgzvP7Qk9tICvZM9PYE=
 			</data>
 		</dict>
 		<key>Resources/core/__pycache__/service.cpython-312.pyc</key>
@@ -2796,7 +2796,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			sfSmV98i8FbBLfV5Z95MZyhjWF4aMnsaV0n7EjMZn50=
+			fSO75POLf4qGOnVM/TSyvbVU/XzhD9Ne6CNi4fRi/3E=
 			</data>
 		</dict>
 		<key>Resources/core/icons/activity.svg</key>
@@ -3246,7 +3246,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			mLB5DJStzP42u3eUTK+VzOrYsiYGcz1zTcyL/XDhuvY=
+			pi0PUQ7ENcNwdjt9ZfWk4j1Yu3tuvAfPe50mnuK6IWs=
 			</data>
 		</dict>
 		<key>Resources/replicator/__pycache__/replicator.cpython-312.pyc</key>
