@@ -247,7 +247,7 @@ class Replicator(QMainWindow):
 
         # --- Database path setup ---
         # Use Helper.get_data_path to locate data/replicator.db
-        data_dir = self._helper.get_data_path("data")
+        data_dir = self._helper.get_data_path("data", scope="system")
         if data_dir is None:
             raise RuntimeError("Could not locate data/ directory via Helper.get_data_path().")
         os.makedirs(data_dir, exist_ok=True)
