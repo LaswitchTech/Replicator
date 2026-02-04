@@ -36,10 +36,12 @@ sed_inplace() {
   fi
 }
 
-# -----------------------------------------------------------------------------
-# macOS icon generation: icon.svg -> icon.icns
-# Regenerates on every build (macOS only) when src/icons/icon.svg exists.
-# Requires: iconutil (built-in) + either rsvg-convert (librsvg) OR inkscape.
+#
+# Icon generation
+# - macOS: icon.svg -> icon.icns (every build)
+# - Windows: icon.svg -> icon.ico (best-effort, every build)
+# Requires: iconutil (macOS) + either rsvg-convert (librsvg) OR inkscape.
+# Windows ICO generation prefers: ImageMagick (magick/convert) OR Python + Pillow.
 # -----------------------------------------------------------------------------
 
 generate_icns_from_svg_macos() {
@@ -97,6 +99,97 @@ generate_icns_from_svg_macos() {
   rm -rf "$iconset"
 }
 
+# -----------------------------------------------------------------------------
+# Windows icon generation: icon.svg -> icon.ico
+# Best-effort: uses inkscape/rsvg-convert to render PNGs then combines to ICO.
+# Prefers ImageMagick; falls back to Python+Pillow if available.
+# -----------------------------------------------------------------------------
+
+generate_ico_from_svg_windows() {
+  [ "$OS" = "windows" ] || return 0
+
+  local svg="src/icons/icon.svg"
+  local out="src/icons/icon.ico"
+
+  [ -f "$svg" ] || return 0
+
+  local renderer=""
+  if command -v rsvg-convert >/dev/null 2>&1; then
+    renderer="rsvg"
+  elif command -v inkscape >/dev/null 2>&1; then
+    renderer="inkscape"
+  else
+    log "WARN: Neither rsvg-convert nor inkscape found; cannot generate .ico from $svg"
+    log "      Install one of them (recommended: Inkscape)"
+    return 0
+  fi
+
+  mkdir -p "build"
+
+  local tmpdir="build/icon.ico.tmp"
+  rm -rf "$tmpdir"
+  mkdir -p "$tmpdir"
+
+  # Common ICO sizes
+  local sizes=(16 24 32 48 64 128 256)
+
+  log "Regenerating Windows icon: $out (from $svg using $renderer)"
+
+  for s in "${sizes[@]}"; do
+    if [ "$renderer" = "rsvg" ]; then
+      rsvg-convert -w "$s" -h "$s" "$svg" -o "$tmpdir/${s}.png"
+    else
+      # inkscape CLI (v1+)
+      inkscape "$svg" --export-type=png --export-width="$s" --export-height="$s" --export-filename="$tmpdir/${s}.png" >/dev/null 2>&1
+    fi
+  done
+
+  # Combine PNGs into ICO
+  if command -v magick >/dev/null 2>&1; then
+    # ImageMagick 7+
+    magick "$tmpdir/16.png" "$tmpdir/24.png" "$tmpdir/32.png" "$tmpdir/48.png" "$tmpdir/64.png" "$tmpdir/128.png" "$tmpdir/256.png" "$out" 2>/dev/null || true
+  elif command -v convert >/dev/null 2>&1; then
+    # ImageMagick 6 (convert)
+    convert "$tmpdir/16.png" "$tmpdir/24.png" "$tmpdir/32.png" "$tmpdir/48.png" "$tmpdir/64.png" "$tmpdir/128.png" "$tmpdir/256.png" "$out" 2>/dev/null || true
+  else
+    # Fallback: Python + Pillow (if available)
+    python - <<'PY' "$tmpdir" "$out" 2>/dev/null || true
+import sys
+from pathlib import Path
+
+tmpdir = Path(sys.argv[1])
+out = Path(sys.argv[2])
+
+try:
+    from PIL import Image
+except Exception:
+    raise SystemExit(1)
+
+sizes = [16, 24, 32, 48, 64, 128, 256]
+imgs = []
+for s in sizes:
+    p = tmpdir / f"{s}.png"
+    if p.exists():
+        imgs.append(Image.open(p))
+
+if not imgs:
+    raise SystemExit(1)
+
+# Pillow writes multi-size ICO when you pass sizes
+base = imgs[-1]
+base.save(out, format="ICO", sizes=[(s, s) for s in sizes])
+PY
+  fi
+
+  if [ -f "$out" ]; then
+    log "Windows icon generated: $out"
+  else
+    log "WARN: Failed to generate $out (install ImageMagick or Python Pillow for best results)"
+  fi
+
+  rm -rf "$tmpdir"
+}
+
 # Guess app name from current folder if not provided
 infer_name() {
   local base
@@ -151,8 +244,88 @@ MODE="console"             # console|windowed
 # Packaging defaults: macOS prefers onedir (for .app), Linux prefers onefile
 PKG=""                     # empty = auto, or onefile/onedir
 
-# Python / venv defaults
-PYTHON_BIN="$(command -v python3.11 || true)"
+#
+# Python discovery
+# - macOS/Linux: prefer python3.11
+# - Windows (Git Bash): prefer the Python Launcher when available, but only if the requested runtime exists.
+PYTHON_BIN=""
+PYTHON_LAUNCH_ARGS=""
+
+python_cmd_ok() {
+  # usage: python_cmd_ok <bin> [args...]
+  # returns 0 if command runs and Python version is >= 3.11
+  "$@" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' >/tmp/.replicator_pyver 2>/dev/null || return 1
+  local ver
+  ver="$(cat /tmp/.replicator_pyver 2>/dev/null || true)"
+  rm -f /tmp/.replicator_pyver 2>/dev/null || true
+  case "$ver" in
+    3.11|3.12|3.13|3.14|3.15|3.16|3.17|3.18|3.19|4.*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Candidate selection (ordered)
+if command -v python3.11 >/dev/null 2>&1 && python_cmd_ok python3.11; then
+  PYTHON_BIN="python3.11"
+  PYTHON_LAUNCH_ARGS=""
+elif [ "$OS" = "windows" ] && command -v py >/dev/null 2>&1; then
+  # Try explicit 3.11 first, then any 3.x that satisfies >=3.11
+  if python_cmd_ok py -3.11; then
+    PYTHON_BIN="py"
+    PYTHON_LAUNCH_ARGS="-3.11"
+  elif python_cmd_ok py -3.12; then
+    PYTHON_BIN="py"
+    PYTHON_LAUNCH_ARGS="-3.12"
+  elif python_cmd_ok py -3.13; then
+    PYTHON_BIN="py"
+    PYTHON_LAUNCH_ARGS="-3.13"
+  elif python_cmd_ok py -3; then
+    PYTHON_BIN="py"
+    PYTHON_LAUNCH_ARGS="-3"
+  fi
+fi
+
+# Fallbacks (Git Bash often exposes only `python`)
+if [ -z "$PYTHON_BIN" ]; then
+  if command -v python3 >/dev/null 2>&1 && python_cmd_ok python3; then
+    PYTHON_BIN="python3"
+    PYTHON_LAUNCH_ARGS=""
+  elif command -v python >/dev/null 2>&1 && python_cmd_ok python; then
+    PYTHON_BIN="python"
+    PYTHON_LAUNCH_ARGS=""
+  fi
+fi
+
+# If user supplied --python, we still validate it later in the script.
+
+python_exec() {
+  # Wrapper so we can call: python_exec -m venv ...
+  [ -n "${PYTHON_BIN:-}" ] || die "Python not found. Install Python 3.11+ and ensure it is in PATH (python) or via the Windows Python Launcher (py)."
+
+  if [ -n "${PYTHON_LAUNCH_ARGS:-}" ]; then
+    # shellcheck disable=SC2086
+    "$PYTHON_BIN" ${PYTHON_LAUNCH_ARGS} "$@"
+  else
+    "$PYTHON_BIN" "$@"
+  fi
+}
+
+venv_python_path() {
+  if [ "$OS" = "windows" ]; then
+    echo "$VENV_DIR/Scripts/python.exe"
+  else
+    echo "$VENV_DIR/bin/python"
+  fi
+}
+
+venv_activate_path() {
+  if [ "$OS" = "windows" ]; then
+    echo "$VENV_DIR/Scripts/activate"
+  else
+    echo "$VENV_DIR/bin/activate"
+  fi
+}
+
 USE_SYSTEM_PYQT=0
 
 # macOS DMG toggle
@@ -500,9 +673,10 @@ if [ "${#CLI_HIDDEN_IMPORTS[@]}" -gt 0 ]; then
 fi
 
 # -----------------------------------------------------------------------------
-# macOS: regenerate icon.icns from icon.svg on every build (if present)
+# Regenerate platform icons from icon.svg on every build (if present)
 # -----------------------------------------------------------------------------
 generate_icns_from_svg_macos
+generate_ico_from_svg_windows
 
 # -----------------------------------------------------------------------------
 # Generate developer-friendly install/run wrapper scripts (if enabled)
@@ -516,11 +690,11 @@ generate_wrapper_scripts() {
   # ---------------------------------------------------------------------------
   # POSIX shell wrapper (macOS/Linux)
   # ---------------------------------------------------------------------------
-  cat >"$out_dir/run.sh" <<'SH'
+  cat >"$out_dir/launch.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Replicator dev/run wrapper
+# Replicator dev launcher (Git Bash compatible)
 # - Creates a virtualenv if missing
 # - Installs runtime deps (prefers requirements.txt if present)
 # - Runs src/main.py
@@ -565,118 +739,89 @@ exec python "src/main.py" "$@"
 SH
 
   # Patch placeholders
-  sed_inplace "s|__VENV_DIR__|$VENV_DIR|g" "$out_dir/run.sh"
-  sed_inplace "s|__REQ_FILE__|$REQ_FILE|g" "$out_dir/run.sh"
-  chmod +x "$out_dir/run.sh" || true
+  sed_inplace "s|__VENV_DIR__|$VENV_DIR|g" "$out_dir/launch.sh"
+  sed_inplace "s|__REQ_FILE__|$REQ_FILE|g" "$out_dir/launch.sh"
+  chmod +x "$out_dir/launch.sh" || true
+
+  # CLI convenience (same as launch.sh but kept as a stable name for docs/scripts)
+  cat >"$out_dir/cli.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT_DIR"
+
+exec "./launch.sh" "$@"
+SH
+  chmod +x "$out_dir/cli.sh" || true
 
   # ---------------------------------------------------------------------------
-  # Windows PowerShell wrapper + .bat convenience launcher
+  # Windows: VBS launcher (launch.vbs) and CLI .bat launcher (cli.bat)
   # ---------------------------------------------------------------------------
-  cat >"$out_dir/run.ps1" <<'PS1'
-Param(
-  [Parameter(ValueFromRemainingArguments=$true)]
-  [string[]]$Args
-)
+  cat >"$out_dir/launch.vbs" <<'VBS'
+' Replicator Windows launcher (no console)
+' - Prefers launching the built binary if present
+' - Falls back to launching Git Bash + launch.sh if available
 
-# Replicator dev/run wrapper
-# - Creates a virtualenv if missing
-# - Installs runtime deps (prefers requirements.txt if present)
-# - Runs src/main.py
+Option Explicit
 
-$ErrorActionPreference = "Stop"
+Dim shell, fso, scriptDir, exePath, bashPath, cmd
+Set shell = CreateObject("WScript.Shell")
+Set fso = CreateObject("Scripting.FileSystemObject")
 
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$RootDir = Resolve-Path $ScriptDir
-Set-Location $RootDir
+scriptDir = fso.GetParentFolderName(WScript.ScriptFullName)
 
-$VenvDir = "__VENV_DIR__"
-$ReqFile = "__REQ_FILE__"
+' Try built EXE first
+exePath = scriptDir & "\\dist\\windows\\Replicator.exe"
+If fso.FileExists(exePath) Then
+  shell.Run Chr(34) & exePath & Chr(34), 0, False
+  WScript.Quit 0
+End If
 
-$Py = "python"
-if (Get-Command "python3.11" -ErrorAction SilentlyContinue) { $Py = "python3.11" }
-elseif (Get-Command "python" -ErrorAction SilentlyContinue) { $Py = "python" }
-else { throw "Python not found in PATH" }
+' Fallback: Git Bash launch.sh (if user is in a dev checkout)
+bashPath = shell.ExpandEnvironmentStrings("%ProgramFiles%") & "\\Git\\bin\\bash.exe"
+If fso.FileExists(bashPath) Then
+  cmd = Chr(34) & bashPath & Chr(34) & " -lc " & Chr(34) & "cd '" & scriptDir & "' && ./launch.sh" & Chr(34)
+  shell.Run cmd, 0, False
+End If
+VBS
 
-if (-not (Test-Path (Join-Path $VenvDir "Scripts\python.exe"))) {
-  Write-Host "Creating virtualenv: $VenvDir"
-  & $Py -m venv $VenvDir
-}
-
-& (Join-Path $VenvDir "Scripts\python.exe") -m pip install --upgrade pip wheel
-
-if (Test-Path $ReqFile) {
-  Write-Host "Installing requirements from $ReqFile"
-  & (Join-Path $VenvDir "Scripts\python.exe") -m pip install -r $ReqFile
-} else {
-  Write-Host "Installing minimal runtime deps (PyQt5)"
-  & (Join-Path $VenvDir "Scripts\python.exe") -m pip install "PyQt5>=5.15,<6"
-}
-
-& (Join-Path $VenvDir "Scripts\python.exe") "src\main.py" @Args
-PS1
-
-  # Patch placeholders (use sed for cross-platform simplicity)
-  sed_inplace "s|__VENV_DIR__|$VENV_DIR|g" "$out_dir/run.ps1"
-  sed_inplace "s|__REQ_FILE__|$REQ_FILE|g" "$out_dir/run.ps1"
-
-  cat >"$out_dir/run.bat" <<'BAT'
+  cat >"$out_dir/cli.bat" <<'BAT'
 @echo off
 setlocal
 
-REM Replicator launcher (Windows)
-REM - Double-click (no args): starts hidden and exits immediately
-REM - CLI usage (with args like --help): runs in the current console so you can see output
+REM Replicator CLI launcher (Windows)
+REM - Runs the built EXE if present
+REM - If not present, asks the user to run ./cli.sh from Git Bash
 
 set "SCRIPT_DIR=%~dp0"
 
-REM If the user provided args, run in the current console (do not hide), so output is visible.
-if not "%~1"=="" (
-  powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%run.ps1" %*
+if exist "%SCRIPT_DIR%dist\\windows\\Replicator.exe" (
+  "%SCRIPT_DIR%dist\\windows\\Replicator.exe" %*
   endlocal
   exit /b %ERRORLEVEL%
 )
 
-REM No args: start hidden and exit right away.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -WindowStyle Hidden -FilePath 'powershell' -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File', (Join-Path '%SCRIPT_DIR%' 'run.ps1'))"
-
+echo Replicator.exe not found at "%SCRIPT_DIR%dist\\windows\\Replicator.exe".
+echo If you are in a dev checkout, use Git Bash and run: ./cli.sh --help
 endlocal
-exit /b 0
+exit /b 1
 BAT
-
-  cat >"$out_dir/run-cli.bat" <<'BAT'
-@echo off
-setlocal
-
-REM Replicator CLI wrapper (Windows)
-REM Always runs in the current console and forwards all arguments.
-
-set "SCRIPT_DIR=%~dp0"
-
-powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%run.ps1" %*
-
-endlocal
-exit /b %ERRORLEVEL%
-BAT
-
-  cat >"$out_dir/run.vbs" <<'VBS'
-' Replicator Windows launcher (no console)
-' Double-click this file to start the app without a prompt window.
-
-Dim shell, scriptDir, ps1
-Set shell = CreateObject("WScript.Shell")
-scriptDir = CreateObject("Scripting.FileSystemObject").GetParentFolderName(WScript.ScriptFullName)
-ps1 = Chr(34) & scriptDir & "\\run.ps1" & Chr(34)
-
-' 0 = hidden window
-shell.Run "powershell -NoProfile -ExecutionPolicy Bypass -File " & ps1, 0, False
-VBS
 }
 
 # -----------------------------------------------------------------------------
 # Validate
 # -----------------------------------------------------------------------------
-[ -n "$PYTHON_BIN" ] || die "python3.11 not found. On macOS: brew install python@3.11"
+[ -n "$PYTHON_BIN" ] || die "Python not found. Install Python 3.11+ and ensure it is available as python (Windows/Git Bash) or via the Windows Python Launcher (py), or as python3.11 (macOS/Linux)."
 [ -f "$ENTRY" ] || die "Entry not found: $ENTRY"
+
+# Validate python runtime is actually runnable and >= 3.11
+if ! python_exec -c "import sys; assert (sys.version_info.major, sys.version_info.minor) >= (3, 11), sys.version" >/dev/null 2>&1; then
+  if [ "$OS" = "windows" ] && [ "$PYTHON_BIN" = "py" ]; then
+    die "Python launcher found, but no suitable Python 3.11+ runtime is installed. Install Python 3.11+ (check 'Add python.exe to PATH') or run: py --list to verify installed versions."
+  fi
+  die "Python is not runnable or is < 3.11. Install Python 3.11+ and try again."
+fi
 
 ARCH="$(uname -m)"
 if [ "$OS" = "linux" ] && { [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "armv7l" ] || [ "$ARCH" = "armhf" ]; }; then
@@ -698,6 +843,8 @@ fi
 if [ -z "$ICON_FILE" ]; then
   if [ "$OS" = "macos" ] && [ -f "src/icons/icon.icns" ]; then
     ICON_FILE="src/icons/icon.icns"
+  elif [ "$OS" = "windows" ] && [ -f "src/icons/icon.ico" ]; then
+    ICON_FILE="src/icons/icon.ico"
   elif [ -f "src/icons/icon.png" ]; then
     ICON_FILE="src/icons/icon.png"
   fi
@@ -734,10 +881,10 @@ generate_wrapper_scripts "."
 # Create/verify venv (Python 3.11)
 # -----------------------------------------------------------------------------
 NEED_RECREATE=0
-if [ ! -x "$VENV_DIR/bin/python" ]; then
+if [ ! -x "$(venv_python_path)" ]; then
   NEED_RECREATE=1
 else
-  VENV_VER="$("$VENV_DIR/bin/python" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' || echo unknown)"
+  VENV_VER="$("$(venv_python_path)" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' || echo unknown)"
   if [ "$VENV_VER" != "3.11" ]; then
     NEED_RECREATE=1
   fi
@@ -747,24 +894,31 @@ if [ "$NEED_RECREATE" -eq 1 ]; then
   log "Creating fresh Python 3.11 virtual environment in $VENV_DIR..."
   rm -rf "$VENV_DIR"
   if [ "$USE_SYSTEM_PYQT" -eq 1 ]; then
-    "$PYTHON_BIN" -m venv --system-site-packages "$VENV_DIR"
+    python_exec -m venv --system-site-packages "$VENV_DIR"
   else
-    "$PYTHON_BIN" -m venv "$VENV_DIR"
+    python_exec -m venv "$VENV_DIR"
   fi
 fi
 
 # shellcheck disable=SC1091
-source "$VENV_DIR/bin/activate"
+source "$(venv_activate_path)"
 
 ACTIVE_VER="$(python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
-[ "$ACTIVE_VER" = "3.11" ] || die "Active Python is $ACTIVE_VER, expected 3.11"
+[ "$ACTIVE_VER" = "3.11" ] || die "Active Python is $ACTIVE_VER, expected 3.11. On Windows, install Python 3.11 and/or use: py -3.11"
 log "Using Python $(python -V)"
 
 log "Updating pip..."
 python -m pip install --upgrade pip wheel
 
 log "Installing build dependencies..."
-python -m pip install "pyinstaller>=6.9,<7" "sip>=6.9,<7"
+python -m pip install "pyinstaller>=6.9,<7"
+
+# PyInstaller on Windows requires .ico (or Pillow for automatic conversion from .png).
+# Install Pillow when building on Windows so we can safely use .png icons or generate .ico.
+if [ "$OS" = "windows" ]; then
+  python -m pip install "pillow>=10,<12" || true
+fi
+
 
 # Optional: system PyQt5 on Linux ARM (APT)
 if [ "$USE_SYSTEM_PYQT" -eq 1 ]; then
@@ -782,6 +936,32 @@ else
   # Default: wheels
   # (Only install PyQt5 if the project uses it; safe to install regardless.)
   python -m pip install "PyQt5>=5.15,<6" || true
+fi
+
+# Ensure SIP bindings are bundled for PyQt5.
+# Note: the importable module is typically `PyQt5.sip` (not `sip`).
+# PyInstaller may still emit a non-fatal warning about hidden import "sip" depending on hooks.
+has_pyqt5=0
+if python -c "import importlib.util; import sys; sys.exit(0 if importlib.util.find_spec('PyQt5') else 1)" >/dev/null 2>&1; then
+  has_pyqt5=1
+fi
+
+if [ "$has_pyqt5" -eq 1 ]; then
+  # Add PyQt5.sip unless the user already provided it.
+  found=0
+  for h in "${HIDDEN_IMPORTS[@]+${HIDDEN_IMPORTS[@]}}"; do
+    [ "$h" = "PyQt5.sip" ] && found=1
+  done
+  if [ "$found" -eq 0 ]; then
+    HIDDEN_IMPORTS+=("PyQt5.sip")
+  fi
+
+  # If the user ever provided `sip`, normalize it early.
+  for i in "${!HIDDEN_IMPORTS[@]}"; do
+    if [ "${HIDDEN_IMPORTS[$i]}" = "sip" ]; then
+      HIDDEN_IMPORTS[$i]="PyQt5.sip"
+    fi
+  done
 fi
 
 # -----------------------------------------------------------------------------
@@ -813,7 +993,45 @@ fi
 
 # Icon
 if [ -n "$ICON_FILE" ] && [ -f "$ICON_FILE" ]; then
-  PYI_ARGS+=(--icon "$ICON_FILE")
+  if [ "$OS" = "windows" ]; then
+    ext="${ICON_FILE##*.}"
+    ext="$(echo "$ext" | tr '[:upper:]' '[:lower:]')"
+
+    # On Windows, PyInstaller only accepts .ico/.exe as icon inputs unless Pillow is installed.
+    # If the provided icon is .png, convert it to a temporary .ico using Pillow.
+    if [ "$ext" = "png" ]; then
+      mkdir -p build
+      ICO_FROM_PNG="build/icon_from_png.ico"
+      python - <<'PY' "$ICON_FILE" "$ICO_FROM_PNG" || true
+import sys
+from pathlib import Path
+
+src = Path(sys.argv[1])
+dst = Path(sys.argv[2])
+
+try:
+    from PIL import Image
+except Exception as e:
+    raise SystemExit(1)
+
+img = Image.open(src).convert("RGBA")
+# Common Windows icon sizes
+sizes = [(16,16), (24,24), (32,32), (48,48), (64,64), (128,128), (256,256)]
+img.save(dst, format="ICO", sizes=sizes)
+print(dst)
+PY
+      if [ -f "$ICO_FROM_PNG" ]; then
+        PYI_ARGS+=(--icon "$ICO_FROM_PNG")
+      else
+        log "WARN: Failed to convert PNG icon to ICO; continuing without --icon"
+      fi
+    else
+      # .ico/.exe already
+      PYI_ARGS+=(--icon "$ICON_FILE")
+    fi
+  else
+    PYI_ARGS+=(--icon "$ICON_FILE")
+  fi
 fi
 
 # Hidden imports
@@ -833,13 +1051,15 @@ PY
 for hi in "${HIDDEN_IMPORTS[@]+${HIDDEN_IMPORTS[@]}}"; do
   [ -n "$hi" ] || continue
 
-  # Normalize common SIP hidden import for PyQt5
+  # Normalize common SIP hidden import for PyQt5.
+  # The standalone `sip` module is often NOT importable even if the sip build tooling is installed.
   if [ "$hi" = "sip" ]; then
-    if can_import "sip"; then
-      :
-    elif can_import "PyQt5.sip"; then
+    if can_import "PyQt5.sip"; then
       log "Normalizing hidden import: sip -> PyQt5.sip"
       hi="PyQt5.sip"
+    else
+      log "WARN: Skipping hidden import not found: sip (and PyQt5.sip not available)"
+      continue
     fi
   fi
 
@@ -920,6 +1140,56 @@ else
 fi
 
 log "Build completed successfully. Output: $FINAL_DIR"
+
+# ---------------------------------------------------------------------------
+# Windows: create a .lnk shortcut (best-effort)
+# ---------------------------------------------------------------------------
+if [ "$OS" = "windows" ]; then
+  EXE_PATH="$(pwd)/$FINAL_DIR/$APP_NAME.exe"
+  LNK_PATH="$(pwd)/$FINAL_DIR/$APP_NAME.lnk"
+
+  # Create a shortcut inside dist/windows (so we can ship it alongside the exe)
+  if [ -f "$EXE_PATH" ]; then
+    mkdir -p "$FINAL_DIR" || true
+    cat >"build/make_shortcut.vbs" <<'VBS'
+Option Explicit
+Dim shell, args, exePath, lnkPath
+Set shell = CreateObject("WScript.Shell")
+Set args = WScript.Arguments
+exePath = args.Item(0)
+lnkPath = args.Item(1)
+Dim sc
+Set sc = shell.CreateShortcut(lnkPath)
+sc.TargetPath = exePath
+sc.WorkingDirectory = CreateObject("Scripting.FileSystemObject").GetParentFolderName(exePath)
+sc.WindowStyle = 1
+sc.Description = "Replicator"
+sc.Save
+VBS
+
+    if command -v cscript >/dev/null 2>&1; then
+      cscript //nologo "build/make_shortcut.vbs" "$(cygpath -w "$EXE_PATH" 2>/dev/null || echo "$EXE_PATH")" "$(cygpath -w "$LNK_PATH" 2>/dev/null || echo "$LNK_PATH")" >/dev/null 2>&1 || true
+    fi
+
+    # Fallback: create a .url shortcut (always works)
+    if [ ! -f "$LNK_PATH" ]; then
+      cat >"$FINAL_DIR/$APP_NAME.url" <<URL
+[InternetShortcut]
+URL=file:///${EXE_PATH}
+IconFile=${EXE_PATH}
+IconIndex=0
+URL
+    fi
+
+    if [ -f "$LNK_PATH" ]; then
+      log "Windows shortcut created: $LNK_PATH"
+    elif [ -f "$FINAL_DIR/$APP_NAME.url" ]; then
+      log "Windows shortcut created: $FINAL_DIR/$APP_NAME.url"
+    else
+      log "WARN: Could not create Windows shortcut (cscript not available)"
+    fi
+  fi
+fi
 
 deactivate
 
