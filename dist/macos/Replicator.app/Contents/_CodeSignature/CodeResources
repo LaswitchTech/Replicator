@@ -362,7 +362,7 @@
 		</data>
 		<key>Resources/base_library.zip</key>
 		<data>
-		kG1V3UtA5q2wFjzf7H1tGo0RL10=
+		9VQViQWrRlhbSvv2IHaInUaYu10=
 		</data>
 		<key>Resources/core/.editorconfig</key>
 		<data>
@@ -506,7 +506,7 @@
 		</data>
 		<key>Resources/core/configuration.py</key>
 		<data>
-		KnMzge1nDF3kOa7FKEAhU3undks=
+		UG2HYg8SsdcMgFtEZTY/5rU/Fzw=
 		</data>
 		<key>Resources/core/database/__init__.py</key>
 		<data>
@@ -566,7 +566,7 @@
 		</data>
 		<key>Resources/core/helper.py</key>
 		<data>
-		Yki8zuznOwafPqsML+mDFXGbe58=
+		dWw4J3XO5liMXphOc0JKjNH3v9A=
 		</data>
 		<key>Resources/core/icons/activity.svg</key>
 		<data>
@@ -718,7 +718,7 @@
 		</data>
 		<key>Resources/core/log.py</key>
 		<data>
-		XJwv7q07Mp/cbZRz6kwCC65DwIw=
+		C8YrIBMgMjfRAZD1afE591UBOzY=
 		</data>
 		<key>Resources/core/network/__pycache__/diagnostic.cpython-311.pyc</key>
 		<data>
@@ -830,7 +830,7 @@
 		</data>
 		<key>Resources/replicator/replicator.py</key>
 		<data>
-		5BisP7SMZUNuvuTI5ZiYnmxbW48=
+		HVPaUvD5mxIiW9yEbQ0TNmjJM5c=
 		</data>
 		<key>Resources/replicator/ui.py</key>
 		<data>
@@ -2439,7 +2439,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			/ewymeGasi8HC26OogTW2X6kAImN9TxA2FWt2UejZNI=
+			DcmT72Hfsdyg5C6ufZ94d5O97HYWh0xYot3HmSpAezw=
 			</data>
 		</dict>
 		<key>Resources/core/.editorconfig</key>
@@ -2691,7 +2691,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			fDr0hii/rY/CODfv6rZ+kwd/luJPHfJJX5rlw6H45oo=
+			WwdazvFucuthJ5eTfXtoCWK+xntpZ0UpiN+sM3UkSAM=
 			</data>
 		</dict>
 		<key>Resources/core/database/__init__.py</key>
@@ -2796,7 +2796,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			xvmkG9RXguDY+m0cAkS1EYSkHgz1Y/VKeU0F3tXoI2Y=
+			sfSmV98i8FbBLfV5Z95MZyhjWF4aMnsaV0n7EjMZn50=
 			</data>
 		</dict>
 		<key>Resources/core/icons/activity.svg</key>
@@ -3062,7 +3062,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			QxX+88u36dVLniNGlEj2/CtB/NEOoQGUFMurvJxGGBQ=
+			bkq9ZYaVSyMzRHLrZOkx/1oCb5+M/I9BCehvJFnewoE=
 			</data>
 		</dict>
 		<key>Resources/core/network/__pycache__/diagnostic.cpython-311.pyc</key>
@@ -3288,7 +3288,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			jfhqPwGbundwGe5yxOGZPb2xKNAKl8LQVq4BM6417Oc=
+			Bld4BYMznTDhR+eEJ1/eZkAuFSuqh5nYJcbMWBCJuPw=
 			</data>
 		</dict>
 		<key>Resources/replicator/ui.py</key>
