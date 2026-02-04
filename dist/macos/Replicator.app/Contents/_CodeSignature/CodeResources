@@ -362,7 +362,7 @@
 		</data>
 		<key>Resources/base_library.zip</key>
 		<data>
-		h8eOHFo0PO2FD4ypFRj7jdPSCqg=
+		qvZcmx1uTDARROddzvjUrM84/EM=
 		</data>
 		<key>Resources/core/.editorconfig</key>
 		<data>
@@ -442,7 +442,7 @@
 		</data>
 		<key>Resources/core/__pycache__/cli.cpython-311.pyc</key>
 		<data>
-		0cfVSAf7yGvIo4nMC4bs6bmEMxY=
+		8lTNBZhC4pnGDKnxTZcc6UkVC4Q=
 		</data>
 		<key>Resources/core/__pycache__/cli.cpython-312.pyc</key>
 		<data>
@@ -450,7 +450,7 @@
 		</data>
 		<key>Resources/core/__pycache__/configuration.cpython-311.pyc</key>
 		<data>
-		CAaaha9qd40NgvnjUViE8EJLfGE=
+		vWF5CIF/oJaGc0Ry3gOoOfGfazg=
 		</data>
 		<key>Resources/core/__pycache__/configuration.cpython-312.pyc</key>
 		<data>
@@ -458,7 +458,7 @@
 		</data>
 		<key>Resources/core/__pycache__/helper.cpython-311.pyc</key>
 		<data>
-		PZQbM1Rjk3YC7SZ9+BPonOqjM74=
+		NYjlsC9mLpqwl7DqJMJmAzGV/MY=
 		</data>
 		<key>Resources/core/__pycache__/helper.cpython-312.pyc</key>
 		<data>
@@ -474,7 +474,7 @@
 		</data>
 		<key>Resources/core/__pycache__/service.cpython-311.pyc</key>
 		<data>
-		RIFns644DGiW6BsqF/HF+EaNftc=
+		7s9tUCLb6d6mzMrW/e0Zxo93jEM=
 		</data>
 		<key>Resources/core/__pycache__/service.cpython-312.pyc</key>
 		<data>
@@ -494,7 +494,7 @@
 		</data>
 		<key>Resources/core/build.sh</key>
 		<data>
-		JloIhKcfGga0GCyC2R0bzXjCvXc=
+		Zi1637oV7ET5QpJrcajeQfIHz/k=
 		</data>
 		<key>Resources/core/bundle.sh</key>
 		<data>
@@ -502,11 +502,11 @@
 		</data>
 		<key>Resources/core/cli.py</key>
 		<data>
-		crxZRMFJYmZA8vVXKKvsN5Wufp8=
+		7hYlxa2dkt86P37pTLHXU8G6+7k=
 		</data>
 		<key>Resources/core/configuration.py</key>
 		<data>
-		78Sb+yq7LMXhIOyPHh20CGGxPDA=
+		KnMzge1nDF3kOa7FKEAhU3undks=
 		</data>
 		<key>Resources/core/database/__init__.py</key>
 		<data>
@@ -566,7 +566,7 @@
 		</data>
 		<key>Resources/core/helper.py</key>
 		<data>
-		5svBpXks2AHWcRcwhatL1Hw+5zI=
+		vBcw1mSZt50jnP+OXOpdgJZdEiw=
 		</data>
 		<key>Resources/core/icons/activity.svg</key>
 		<data>
@@ -746,7 +746,7 @@
 		</data>
 		<key>Resources/core/service.py</key>
 		<data>
-		hcVB2dgsNjjNMV3XiG1d9Dx8EJ4=
+		4LTO7LLbHl+x3Lxflb8s2zTxIKY=
 		</data>
 		<key>Resources/core/styles/style.css</key>
 		<data>
@@ -806,7 +806,7 @@
 		</data>
 		<key>Resources/replicator/__pycache__/replicator.cpython-311.pyc</key>
 		<data>
-		iq3l66o+rQ+1xovPIyQMJXhEPxQ=
+		u2lpke6WARbM40DHmC7Op3PqQ8k=
 		</data>
 		<key>Resources/replicator/__pycache__/replicator.cpython-312.pyc</key>
 		<data>
@@ -830,7 +830,7 @@
 		</data>
 		<key>Resources/replicator/replicator.py</key>
 		<data>
-		CwPqPnPmO6OGRsnyBB8+dEM+fjw=
+		snVJQF522LPaJYob5RuJodVC4TU=
 		</data>
 		<key>Resources/replicator/ui.py</key>
 		<data>
@@ -2430,7 +2430,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			lR7rtuUtwJYtEAl66tCh8h0l7F4hQJ3R53KBLX+A70M=
+			ecZqJtSKG8YCMIErNi2ma0ZTPgqQa/JdUQdT1RhDAQM=
 			</data>
 		</dict>
 		<key>Resources/core/.editorconfig</key>
@@ -2570,7 +2570,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			mNYHXJOafLPyitzQ9M5XSeVYu1RP3VuuT+lSrpUUnDM=
+			RabnrQ8LshapZkgDycCKNdKiJ1isQ274mtNULqAEOTM=
 			</data>
 		</dict>
 		<key>Resources/core/__pycache__/cli.cpython-312.pyc</key>
@@ -2584,7 +2584,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			47+VtrHa46glrkkBFQKi4RD6Rgb3jCHTzEmUUZr9yek=
+			x4mNVhP7BXCDoRmdFQ+5WTsWzAiWc9AfHDC+/la5AlQ=
 			</data>
 		</dict>
 		<key>Resources/core/__pycache__/configuration.cpython-312.pyc</key>
@@ -2598,7 +2598,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			QqN6wtvfw+VefWGmplMQ8rGUSKu2/ElLW4mY+gjRKY0=
+			TrY1yykFMPoqlRHl/pIua/r2a8vClsAj8szJXyp9OpU=
 			</data>
 		</dict>
 		<key>Resources/core/__pycache__/helper.cpython-312.pyc</key>
@@ -2626,7 +2626,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			ThuxlNj15sIxmJdSbvwuS73evn3Kc0dq0tpTl8Rei/I=
+			IXFOi5/WwtJeXpvtWEM7+3+uECkHJHGK1K9jF8ilA8c=
 			</data>
 		</dict>
 		<key>Resources/core/__pycache__/service.cpython-312.pyc</key>
@@ -2661,7 +2661,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			6Crtsmg5kJbpFWLxLHWYM5SbJRa3tjH/bD9oxy2z/UI=
+			9qg/Gzd8iiE2H7lRXx8XYvcsBIaWOBkszyTC0pWROjA=
 			</data>
 		</dict>
 		<key>Resources/core/bundle.sh</key>
@@ -2675,14 +2675,14 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			cv7zV3aWfLrOkl8it75RCAAO8vYVapSLn7YKGZ5Nn6o=
+			P8ZtwzaSw2atDhngNpcHODdsrfPDA2S6/K0Lm1hcubM=
 			</data>
 		</dict>
 		<key>Resources/core/configuration.py</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			0b/k3WgZUPqql7mvKb78IGPRIjj4hx1bXbl2SAIn1gQ=
+			fDr0hii/rY/CODfv6rZ+kwd/luJPHfJJX5rlw6H45oo=
 			</data>
 		</dict>
 		<key>Resources/core/database/__init__.py</key>
@@ -2787,7 +2787,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			EIeqvW/hwcZu714FsHEKq3qntLt76JyY7eus4Mj3Bdw=
+			8gE3lM/7fgfUpvcz3JIBsxwuflkYGweGCs8mZT3q6gY=
 			</data>
 		</dict>
 		<key>Resources/core/icons/activity.svg</key>
@@ -3102,7 +3102,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			qsct7Khom3dQuwcsaFJrX8h4k2vU1hI0MMj6Eel8kh4=
+			MNY4oxW6u2yLGh9n/Jojs+2vx2QC/Gq4wv2sgL1YZS4=
 			</data>
 		</dict>
 		<key>Resources/core/styles/style.css</key>
@@ -3237,7 +3237,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			pY04zGsE+9YrwFcm9xBkmzklQvvypN46Ypj9rBQwptU=
+			1MYmj8rZztg+ZcOip9zjw8x7HzF1rF33GUGaozTwx4A=
 			</data>
 		</dict>
 		<key>Resources/replicator/__pycache__/replicator.cpython-312.pyc</key>
@@ -3279,7 +3279,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			f0m0sfIw9aDApjuvcGQxZSoR3V4InFmp4ujKV2xJ6aQ=
+			5Y9pTAtIHgKFMpCGBUPUwzl8Jb6zNsu7LbPugTpLMf4=
 			</data>
 		</dict>
 		<key>Resources/replicator/ui.py</key>

@@ -56,20 +56,15 @@ class Service:
 
         # Service configuration defaults
         if self._configuration is not None:
-            print("Initializing service configuration defaults...")
             # How often the main loop wakes up to check due tasks (seconds)
             self._configuration.add("service.loopSleep", 1, "number", label="Service loop sleep (s)", min=1, max=60)
             # Default interval used when registering tasks (seconds)
             self._configuration.add("service.defaultInterval", 3600, "number", label="Service default task interval (s)", min=1, max=86400)
+            # Reverse-DNS prefix used to name/register the service (e.g. com.laswitchtech)
+            # The final label becomes: <domain>.<appname> (lowercased and sanitized)
+            self._configuration.add("service.domain", "com.corepy", "text", label="Service domain (reverse DNS)")
             # Persist any new defaults
             self._configuration.save()
-
-            # Service control buttons (shown/hidden dynamically)
-            self._configuration.add("service.actions.start", None, "button", label="Start Service", action=self.start)
-            self._configuration.add("service.actions.stop", None, "button", label="Stop Service", action=self.stop)
-            self._configuration.add("service.actions.restart", None, "button", label="Restart Service", action=self.restart)
-            self._configuration.add("service.actions.install", None, "button", label="Install Service", action=self.install)
-            self._configuration.add("service.actions.uninstall", None, "button", label="Uninstall Service", action=self.uninstall)
 
             # Initial visibility update
             self._refresh_action_visibility()
@@ -79,6 +74,27 @@ class Service:
                 self._configuration.configChanged.connect(lambda _cfg: self._refresh_action_visibility())
             except Exception:
                 pass
+    def _service_domain(self) -> str:
+        """Return reverse-DNS domain used for service labels.
+
+        Prefer configuration key `service.domain` when available; fall back to
+        an environment override COREPY_SERVICE_DOMAIN; then to 'com.corepy'.
+        """
+        # 1) Configuration
+        try:
+            if self._configuration is not None:
+                v = (self._configuration.get("service.domain", "") or "").strip()
+                if v:
+                    return v
+        except Exception:
+            pass
+
+        # 2) Environment override
+        v = (os.environ.get("COREPY_SERVICE_DOMAIN") or "").strip()
+        if v:
+            return v
+
+        return "com.corepy"
     def _refresh_action_visibility(self) -> None:
         """Show/hide configuration action buttons based on install/running state."""
         if self._configuration is None:
@@ -107,12 +123,12 @@ class Service:
         if cli is None:
             return
 
-        cli.add("status", "Show service status.", self.status)
-        cli.add("start", "Start the service loop.", self.start)
-        cli.add("stop", "Stop the running service.", self.stop)
-        cli.add("restart", "Restart the running service.", self.restart)
-        cli.add("install", "Install as a python service.", self.install)
-        cli.add("uninstall", "Uninstall the python service.", self.uninstall)
+        cli.add("service.status", "Show service status.", self.status)
+        cli.add("service.start", "Start the service loop.", self.start)
+        cli.add("service.stop", "Stop the running service.", self.stop)
+        cli.add("service.restart", "Restart the running service.", self.restart)
+        cli.add("service.install", "Install as a python service.", self.install)
+        cli.add("service.uninstall", "Uninstall the python service.", self.uninstall)
 
     # ------------------------------------------------------------------
     # Task registry
@@ -220,8 +236,10 @@ class Service:
         """Enter the service loop in the current process."""
         self._stop_requested = False
 
-        # If installed, delegate to platform service manager.
-        if self._is_installed():
+        # If installed, either:
+        # - We are a *manager* request (user invoked --start): delegate to OS manager, OR
+        # - We are the *service process* (OS invoked --start): run the loop in-process.
+        if self._is_installed() and not self._running_under_service_manager():
             self._service_manager_start()
             self._refresh_action_visibility()
             return
@@ -440,6 +458,8 @@ class Service:
             "After=network.target\n\n"
             "[Service]\n"
             "Type=simple\n"
+            "Environment=COREPY_RUN_AS_SERVICE=1\n"
+            f"Environment=COREPY_SERVICE_LABEL={self._service_label()}\n"
             f"WorkingDirectory={working_dir}\n"
             f"ExecStart={python_exe} {entrypoint} --start\n"
             f"ExecStop={python_exe} {entrypoint} --stop\n"
@@ -450,6 +470,34 @@ class Service:
             "[Install]\n"
             "WantedBy=multi-user.target\n"
         )
+    def _running_under_service_manager(self) -> bool:
+        """Return True if this process should run the service loop.
+
+        When installed, `start()` is used both to *request* the service manager to
+        start the job and as the entrypoint that the service manager executes.
+
+        We differentiate the two cases using an explicit env flag set by the
+        service definitions (launchd/systemd/Windows), plus a couple of platform
+        hints as fallback.
+        """
+        # Explicit flag (preferred)
+        flag = (os.environ.get("COREPY_RUN_AS_SERVICE") or "").strip().lower()
+        if flag in ("1", "true", "yes", "on"):
+            return True
+
+        # Fallback hints
+        if sys.platform == "darwin":
+            # launchd commonly sets this for jobs
+            xpc = (os.environ.get("XPC_SERVICE_NAME") or "").strip()
+            if xpc and xpc == self._service_label():
+                return True
+
+        if not sys.platform.startswith("win"):
+            # systemd sets INVOCATION_ID for services
+            if os.environ.get("INVOCATION_ID"):
+                return True
+
+        return False
 
     # ------------------------------------------------------------------
     # Internals
@@ -526,16 +574,82 @@ class Service:
     # ------------------------------------------------------------------
 
     def _service_label(self) -> str:
-        # Use a stable label for OS service registration
-        name = self._app_name() or "corepy"
-        safe = "".join(c if c.isalnum() or c in ("-", "_", ".") else "-" for c in name)
-        return safe
+        """Stable label used for OS service registration.
+
+        - macOS launchd prefers reverse-DNS labels.
+        - Windows 'sc' service names and systemd unit names also benefit from stability.
+
+        Result: <domain>.<appname> (lowercased and sanitized)
+        """
+        domain = (self._service_domain() or "com.corepy").strip().strip(".")
+        app = (self._app_name() or "corepy").strip()
+
+        base = f"{domain}.{app}" if domain else app
+        base = base.lower()
+
+        # Keep only characters typically safe across platforms; replace others with '-'
+        safe = "".join(c if c.isalnum() or c in ("-", "_", ".") else "-" for c in base)
+        # Avoid accidental leading/trailing dots
+        safe = safe.strip(".")
+        return safe or "com.corepy.corepy"
 
     def _entry_command(self) -> tuple[str, str, str]:
-        """Return (python_exe, entrypoint, working_dir) for service registration."""
+        """Return (python_exe, entrypoint, working_dir) for service registration.
+
+        Notes:
+        - When `sys.argv[0]` is a relative path and the current working directory
+          is already inside `src/`, it's easy to end up with paths like `src/src/main.py`.
+        - launchd will happily try to execute that path, but the process will fail.
+
+        This helper resolves the path and applies a small normalization pass.
+        """
         python_exe = sys.executable
-        entry = os.path.abspath(sys.argv[0])
-        workdir = os.path.dirname(entry)
+
+        # Resolve argv[0] robustly (handles relative paths)
+        try:
+            p = Path(sys.argv[0]).expanduser()
+            entry_path = (p if p.is_absolute() else (Path.cwd() / p)).resolve()
+        except Exception:
+            entry_path = Path(os.path.abspath(sys.argv[0]))
+
+        def _dedupe_consecutive(parts: list[str]) -> list[str]:
+            out: list[str] = []
+            for seg in parts:
+                if out and out[-1] == seg:
+                    continue
+                out.append(seg)
+            return out
+
+        # If we ended up with duplicated segments like .../src/src/..., collapse them.
+        parts = list(entry_path.parts)
+        deduped = Path(*_dedupe_consecutive(parts))
+
+        # Prefer the deduped version if it exists.
+        if deduped.exists():
+            entry_path = deduped
+        else:
+            # Common case: /.../src/src/main.py -> /.../src/main.py
+            # If the path contains two consecutive 'src' segments, drop one.
+            if "src" in parts:
+                try:
+                    new_parts: list[str] = []
+                    i = 0
+                    while i < len(parts):
+                        if i + 1 < len(parts) and parts[i] == parts[i + 1]:
+                            # Drop the duplicate segment
+                            new_parts.append(parts[i])
+                            i += 2
+                            continue
+                        new_parts.append(parts[i])
+                        i += 1
+                    candidate = Path(*new_parts)
+                    if candidate.exists():
+                        entry_path = candidate
+                except Exception:
+                    pass
+
+        entry = str(entry_path)
+        workdir = str(entry_path.parent)
         return python_exe, entry, workdir
 
     def _is_installed(self) -> bool:
@@ -569,9 +683,21 @@ class Service:
                 return "RUNNING" in out.upper()
             if sys.platform == "darwin":
                 label = self._service_label()
-                # launchctl print is a good indicator when loaded
                 r = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{label}"], capture_output=True, text=True)
-                return r.returncode == 0
+                if r.returncode != 0:
+                    return False
+                out = (r.stdout or "") + (r.stderr or "")
+                o = out.lower()
+                # Typical indicators in `launchctl print` output
+                if "job state = running" in o:
+                    return True
+                if "state = running" in o:
+                    return True
+                # If explicitly exited, consider not running
+                if "job state = exited" in o:
+                    return False
+                # Fallback: loaded but ambiguous => treat as active
+                return True
             # linux
             if shutil.which("systemctl") is None:
                 return False
@@ -590,10 +716,24 @@ class Service:
                 return
             if sys.platform == "darwin":
                 plist = self._macos_plist_path()
-                if plist.exists():
-                    subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist)], check=False)
-                    subprocess.run(["launchctl", "enable", f"gui/{os.getuid()}/{label}"], check=False)
-                    subprocess.run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{label}"], check=False)
+                domain = f"gui/{os.getuid()}"
+                target = f"{domain}/{label}"
+
+                # If it's already loaded, bootstrap may fail with error 5.
+                already_loaded = False
+                try:
+                    r = subprocess.run(["launchctl", "print", target], capture_output=True, text=True)
+                    already_loaded = (r.returncode == 0)
+                except Exception:
+                    already_loaded = False
+
+                if plist.exists() and not already_loaded:
+                    subprocess.run(["launchctl", "bootstrap", domain, str(plist)], check=False)
+
+                # Enable + kickstart regardless (these are safe even if already loaded)
+                subprocess.run(["launchctl", "enable", target], check=False)
+                subprocess.run(["launchctl", "kickstart", "-k", target], check=False)
+
                 self._log(f"Requested start for launchd agent: {label}")
                 return
             # linux
@@ -648,7 +788,11 @@ class Service:
         python_exe, entry, workdir = self._entry_command()
 
         # binPath must be a single string; include working directory by using cmd.exe /c cd ... && ...
-        cmd = f'cmd.exe /c "cd /d {workdir} && \\"{python_exe}\\" \\"{entry}\\" --start"'
+        cmd = (
+            f'cmd.exe /c "set COREPY_RUN_AS_SERVICE=1 && '
+            f'set COREPY_SERVICE_LABEL={name} && '
+            f'cd /d {workdir} && \\"{python_exe}\\" \\"{entry}\\" --start"'
+        )
 
         # Create service (requires admin)
         r = subprocess.run(["sc", "create", name, f"binPath=", cmd, "start=", "auto"], capture_output=True, text=True)
@@ -678,6 +822,9 @@ class Service:
         python_exe, entry, workdir = self._entry_command()
         plist_path = self._macos_plist_path()
         plist_path.parent.mkdir(parents=True, exist_ok=True)
+        # Ensure logs directory exists
+        logs_dir = Path.home() / "Library" / "Logs" / self._app_name()
+        logs_dir.mkdir(parents=True, exist_ok=True)
 
         # Simple LaunchAgent; keep it alive, run at load.
         plist = (
@@ -693,10 +840,15 @@ class Service:
             "    <string>--start</string>\n"
             "  </array>\n"
             f"  <key>WorkingDirectory</key><string>{workdir}</string>\n"
+            "  <key>EnvironmentVariables</key>\n"
+            "  <dict>\n"
+            "    <key>COREPY_RUN_AS_SERVICE</key><string>1</string>\n"
+            f"    <key>COREPY_SERVICE_LABEL</key><string>{label}</string>\n"
+            "  </dict>\n"
             "  <key>RunAtLoad</key><true/>\n"
             "  <key>KeepAlive</key><true/>\n"
-            "  <key>StandardOutPath</key><string>~/Library/Logs/Replicator/service.out.log</string>\n"
-            "  <key>StandardErrorPath</key><string>~/Library/Logs/Replicator/service.err.log</string>\n"
+            f"  <key>StandardOutPath</key><string>{Path.home() / 'Library' / 'Logs' / self._app_name() / 'service.out.log'}</string>\n"
+            f"  <key>StandardErrorPath</key><string>{Path.home() / 'Library' / 'Logs' / self._app_name() / 'service.err.log'}</string>\n"
             "</dict>\n"
             "</plist>\n"
         )

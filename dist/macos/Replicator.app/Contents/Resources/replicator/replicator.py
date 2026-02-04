@@ -246,12 +246,11 @@ class Replicator(QMainWindow):
         self._fs = FileSystem(helper=self._helper, logger=self._logger)
 
         # --- Database path setup ---
-        # Use Helper.get_cwd() if present, else os.getcwd()
-        if hasattr(self._helper, "get_cwd") and callable(getattr(self._helper, "get_cwd", None)):
-            base_dir = self._helper.get_cwd()
-        else:
-            base_dir = os.getcwd()
-        data_dir = os.path.join(base_dir, "data")
+        # Use Helper.get_data_path to locate data/replicator.db
+        data_dir = self._helper.get_data_path("data")
+        if data_dir is None:
+            raise RuntimeError("Could not locate data/ directory via Helper.get_data_path().")
+        os.makedirs(data_dir, exist_ok=True)
         db_path = os.path.join(data_dir, "replicator.db")
 
         # --- Database (corePY SQLite wrapper) + migrations ---
