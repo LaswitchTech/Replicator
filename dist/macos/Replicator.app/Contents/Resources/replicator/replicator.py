@@ -98,8 +98,6 @@ class _MountedEndpoint:
             except Exception:
                 pass
 
-
-
 # --- Location parsing helpers for remote endpoints ---
 
 def _parse_smb_location(loc: str) -> tuple[str, str]:
@@ -123,9 +121,6 @@ def _parse_smb_location(loc: str) -> tuple[str, str]:
     host = parts[0]
     remote = "/".join(parts[1:])
     return host, remote
-
-
-
 
 def _mount_endpoint_if_remote(
     endpoint: dict[str, Any],
