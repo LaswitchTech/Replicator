@@ -362,7 +362,7 @@
 		</data>
 		<key>Resources/base_library.zip</key>
 		<data>
-		5nDShFymWXniBj77FYnnkzKnCSE=
+		oWgbIsS9ZWTn+qVg/GaYtO6oFb8=
 		</data>
 		<key>Resources/core/.editorconfig</key>
 		<data>
@@ -746,7 +746,15 @@
 		</data>
 		<key>Resources/core/service.py</key>
 		<data>
-		lz98j2uBBxpyKrFKuy3aGjYt6Sc=
+		K0LX7m6uj3lbrcp8GTX4mz2rUhE=
+		</data>
+		<key>Resources/core/src/bin/nssm/windows/x86/nssm.exe</key>
+		<data>
+		4ZCMqrb5OEBK+Fp98PgPh3pNnuY=
+		</data>
+		<key>Resources/core/src/bin/nssm/windows/x86_64/nssm.exe</key>
+		<data>
+		R8ESwjx73yrySiC9US+R/2r3a8Y=
 		</data>
 		<key>Resources/core/styles/style.css</key>
 		<data>
@@ -2439,7 +2447,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			BWOFudmUyWmj5ZZ85vd4UEl5pF3nP22HvLZaptbfV6o=
+			/SvGK40I97a9WSQiJVU5dPptmgio4z0IXHTegYyhp6E=
 			</data>
 		</dict>
 		<key>Resources/core/.editorconfig</key>
@@ -3111,7 +3119,21 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			M6s+z/mc0PVLslrSA6HJbhc1rDeZWFedQrSTUeZ9wIw=
+			cm3ZMfKsLMOBjngG9HrDRfn9wMJLGWLPhc4FJTkamWk=
+			</data>
+		</dict>
+		<key>Resources/core/src/bin/nssm/windows/x86/nssm.exe</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			RyIyyoIbXC71YqsH9TY4vCzILq6EzqE/vmdNYCK2SBw=
+			</data>
+		</dict>
+		<key>Resources/core/src/bin/nssm/windows/x86_64/nssm.exe</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			9onumvlLAOnj8LsHKzTKryB/Mty09Xgvyco1HfmgbJc=
 			</data>
 		</dict>
 		<key>Resources/core/styles/style.css</key>
