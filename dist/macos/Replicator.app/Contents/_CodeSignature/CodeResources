@@ -362,7 +362,7 @@
 		</data>
 		<key>Resources/base_library.zip</key>
 		<data>
-		pd7cAmsGQ86pr5H8pUmXvDIEk8U=
+		DZqR1ianMwWNZjnCOXuVNk2UFOk=
 		</data>
 		<key>Resources/bin/nssm/windows/x86/nssm.exe</key>
 		<data>
@@ -438,7 +438,7 @@
 		</data>
 		<key>Resources/core/__pycache__/application.cpython-311.pyc</key>
 		<data>
-		axp6xNq4DX0Q0UTT/trploPqx7o=
+		VKGYpga9T19n7NwuikhJKKLoIHA=
 		</data>
 		<key>Resources/core/__pycache__/application.cpython-312.pyc</key>
 		<data>
@@ -482,7 +482,7 @@
 		</data>
 		<key>Resources/core/__pycache__/service.cpython-311.pyc</key>
 		<data>
-		BM0vGM7JYp6/bLGzWHO8ewW57MU=
+		L4S9ibddBMsYpavVkVrZitXuRQk=
 		</data>
 		<key>Resources/core/__pycache__/service.cpython-312.pyc</key>
 		<data>
@@ -498,7 +498,7 @@
 		</data>
 		<key>Resources/core/application.py</key>
 		<data>
-		oq8hshixVtS3ycXhmWNL52FmaG8=
+		1PdL7ghNbE3+41tK0QQNwt5NO6o=
 		</data>
 		<key>Resources/core/build.sh</key>
 		<data>
@@ -8962,7 +8962,7 @@
 		</data>
 		<key>Resources/core/service.py</key>
 		<data>
-		02j86hZSmeZdPHQiWiMFBLwH9u8=
+		jZYXbeTHkwP3u4DoLMU1BJupDbc=
 		</data>
 		<key>Resources/core/src/bin/nssm/windows/x86/nssm.exe</key>
 		<data>
@@ -10668,7 +10668,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			Su9nvDXAzBK6ORd4jUrq/ytL142x0Cqr1eJxdaESiA4=
+			kudPlCHR2UuAa6c2H0MJniZddguROnxdZNFbqjlt0cI=
 			</data>
 		</dict>
 		<key>Resources/bin/nssm/windows/x86/nssm.exe</key>
@@ -10801,7 +10801,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			reWJQVe2+NIzwEfiBqAD6HSRD7W1a4xxCjcpKPgiKxg=
+			948ySdJv3u1CCtUKYlr/YC2AzCUkixZim5yLuI68kbA=
 			</data>
 		</dict>
 		<key>Resources/core/__pycache__/application.cpython-312.pyc</key>
@@ -10878,7 +10878,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			s0bEUYY6LZt46Vozp9s9RZfF69p9RyYfCG+jqvR5p5E=
+			t4UTQYEzToDbheHqiGWQWiARyBFg4IXbCVscqdmXxB0=
 			</data>
 		</dict>
 		<key>Resources/core/__pycache__/service.cpython-312.pyc</key>
@@ -10906,7 +10906,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			oFdYS10yOvb4cwVRZMG2VUIoPsrwMl5ExdptxBg8qug=
+			9diZqiQMmVPVpVOgIAVRT54BhIGqt0dVkH4U9QQz6U0=
 			</data>
 		</dict>
 		<key>Resources/core/build.sh</key>
@@ -25718,7 +25718,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			+ePRHdUnOkLi1l8ZhJDTxB8FzzTz+oem5GxqBn0jjeA=
+			hiZk6jw1ViJGysOBp7qXE//ZEiIOHoasAVe++Re8Sds=
 			</data>
 		</dict>
 		<key>Resources/core/src/bin/nssm/windows/x86/nssm.exe</key>
