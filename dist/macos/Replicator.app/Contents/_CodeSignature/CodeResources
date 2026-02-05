@@ -362,7 +362,15 @@
 		</data>
 		<key>Resources/base_library.zip</key>
 		<data>
-		ltL62hXkgzA5uvHtc8XLPexAsYQ=
+		mNcmy9reyKcMypXkVHagRjpoGdg=
+		</data>
+		<key>Resources/bin/nssm/windows/x86/nssm.exe</key>
+		<data>
+		4ZCMqrb5OEBK+Fp98PgPh3pNnuY=
+		</data>
+		<key>Resources/bin/nssm/windows/x86_64/nssm.exe</key>
+		<data>
+		R8ESwjx73yrySiC9US+R/2r3a8Y=
 		</data>
 		<key>Resources/core/.editorconfig</key>
 		<data>
@@ -494,7 +502,7 @@
 		</data>
 		<key>Resources/core/build.sh</key>
 		<data>
-		4HMoyYYSMEs38098OwfQ2YNflUE=
+		ACFtW7ca5miLZlF2W3Cp1QYPJ6A=
 		</data>
 		<key>Resources/core/bundle.sh</key>
 		<data>
@@ -1240,6 +1248,11 @@
 		<dict>
 			<key>symlink</key>
 			<string>../Resources/base_library.zip</string>
+		</dict>
+		<key>Frameworks/bin</key>
+		<dict>
+			<key>symlink</key>
+			<string>../Resources/bin</string>
 		</dict>
 		<key>Frameworks/core</key>
 		<dict>
@@ -2447,7 +2460,21 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			e6QFxlv5pAjo2TduI+qJVbQgruvxc1gzqNmhB5W22CQ=
+			wpFl1Bekl9Eov3sJWtdqkCvNGqEREWiFp29ny76MV5w=
+			</data>
+		</dict>
+		<key>Resources/bin/nssm/windows/x86/nssm.exe</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			RyIyyoIbXC71YqsH9TY4vCzILq6EzqE/vmdNYCK2SBw=
+			</data>
+		</dict>
+		<key>Resources/bin/nssm/windows/x86_64/nssm.exe</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			9onumvlLAOnj8LsHKzTKryB/Mty09Xgvyco1HfmgbJc=
 			</data>
 		</dict>
 		<key>Resources/core/.editorconfig</key>
@@ -2678,7 +2705,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			pu1CwYpV0S5zvLn48X0aa94Oa/fg/VMi5qVzTyr77yw=
+			QQcvQIAicRkAHVzo8c7uWYNsirwM5LyayOodY4PoxwY=
 			</data>
 		</dict>
 		<key>Resources/core/bundle.sh</key>
