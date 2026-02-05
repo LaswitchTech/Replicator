@@ -362,7 +362,7 @@
 		</data>
 		<key>Resources/base_library.zip</key>
 		<data>
-		0JEHsqCYRwqk3a3Pv8KL6l2MI+M=
+		r60JB+WR7J3hw462PGINgbRsUj4=
 		</data>
 		<key>Resources/bin/nssm/windows/x86/nssm.exe</key>
 		<data>
@@ -570,7 +570,7 @@
 		</data>
 		<key>Resources/core/filesystem/share.py</key>
 		<data>
-		FmNP4maxuGpOoTLmpUpsjSzyAto=
+		/YLNU62OORn/Md76aafdzD2FP1E=
 		</data>
 		<key>Resources/core/helper.py</key>
 		<data>
@@ -8974,7 +8974,7 @@
 		</data>
 		<key>Resources/core/styles/style.css</key>
 		<data>
-		Q/AJJrT/v2sDZRBEg58ub8urcqI=
+		IRkhZG9q4R4qgXwIW+BmQoNqC50=
 		</data>
 		<key>Resources/core/ui.py</key>
 		<data>
@@ -9030,7 +9030,7 @@
 		</data>
 		<key>Resources/replicator/__pycache__/replicator.cpython-311.pyc</key>
 		<data>
-		qJLMIUtr9ANPC1+8uiSVyLA67AM=
+		LhpQaA2dwyVXPosoQyCySkOyApU=
 		</data>
 		<key>Resources/replicator/__pycache__/replicator.cpython-312.pyc</key>
 		<data>
@@ -10668,7 +10668,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			IsaWvzQGKKZsSN0d8Tf9wuqoUGcAihoUbfmhdTTt/d8=
+			O6PNhVCZhQCgIVqLGMRaAQf/SvGe6/KGoKZBEO8/Wdg=
 			</data>
 		</dict>
 		<key>Resources/bin/nssm/windows/x86/nssm.exe</key>
@@ -11032,7 +11032,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			QFa6a+Wc5Vh1z/ldIu6hnFqf7DgcSYJ+s70uDrjX7Cw=
+			TgETzShGRx+1TFlbsa9DIZWLcvcVlqIO7hV6ELxjb8I=
 			</data>
 		</dict>
 		<key>Resources/core/helper.py</key>
@@ -25739,7 +25739,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			cC3qj42e9jNDUrbb/WyDPSK78o776VL6GATed9n8qOA=
+			BuixOG8lj2u55nsAz0cVFGPAb7YGBPlgZIIyV5XaaY0=
 			</data>
 		</dict>
 		<key>Resources/core/ui.py</key>
@@ -25867,7 +25867,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			3awIuH2v2XnhZCtaNDDh9dJm7MVifQ0lVA0puzf91tg=
+			yAhOxXmto6kWL3KmatPskht7OZC96DRHN86d9EsZ9AU=
 			</data>
 		</dict>
 		<key>Resources/replicator/__pycache__/replicator.cpython-312.pyc</key>
