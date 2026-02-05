@@ -969,13 +969,20 @@ class Replicator(QMainWindow):
 
         root.addWidget(self._table)
 
-        # --- Bottom row: Configurator and Run now (right aligned) ---
+        # --- Bottom row: Service Manager, Configurator and Run now (right aligned) ---
         bottom_row = QHBoxLayout()
         bottom_row.addStretch(1)
+
+        service_btn = Form.button(label="", icon="hdd-network", action=self._open_service_manager)
+        service_btn.setToolTip("Service Manager")
+
         config_btn = Form.button(label="", icon="gear-fill", action=self._configuration.show)
         config_btn.setToolTip("Configurator")
+
         run_btn = Form.button(label="", icon="play-fill", action=lambda: self._run_with_ui_feedback())
         run_btn.setToolTip("Run now")
+
+        bottom_row.addWidget(service_btn)
         bottom_row.addWidget(config_btn)
         bottom_row.addWidget(run_btn)
         root.addLayout(bottom_row)
@@ -1539,9 +1546,6 @@ class Replicator(QMainWindow):
         except Exception as e:
             self._log(f"[Replicator][DB] Snapshot failed: {e}", level="warning")
 
-
-
-
     def _db_maintenance(self) -> None:
         """Prune old history and run lightweight SQLite maintenance.
 
@@ -1623,3 +1627,27 @@ class Replicator(QMainWindow):
             self._log("[Replicator][DB] Maintenance completed.", level="debug")
         except Exception as e:
             self._log(f"[Replicator][DB] Maintenance failed: {e}", level="warning")
+
+    def _open_service_manager(self) -> None:
+        """Open the corePY Service Manager dialog (if available)."""
+        try:
+            svc = getattr(self._app, "service", None)
+            if svc is None:
+                raise RuntimeError("Service is not available on the application instance.")
+
+            # Preferred helper added in corePY Service
+            if hasattr(svc, "open_manager_dialog"):
+                svc.open_manager_dialog(parent=self)
+                return
+
+            # Fallback: if the dialog class exists, try to instantiate it
+            dlg_cls = getattr(svc, "ServiceManagerDialog", None)
+            if dlg_cls is not None:
+                dlg = dlg_cls(parent=self, service=svc)
+                dlg.exec_()
+                return
+
+            raise RuntimeError("Service manager UI is not available in this build.")
+
+        except Exception as e:
+            MsgBox.show(self, "Service", f"Unable to open Service Manager: {e}", icon="warning")
