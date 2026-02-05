@@ -1380,16 +1380,6 @@ class ServiceManagerDialog(QDialog):
         self.setWindowTitle("Service Manager")
         self.setModal(True)
         self.resize(980, 560)
-        # Ensure GroupBox titles and log views respect the dark theme on Windows.
-        # (Windows styles sometimes keep GroupBox titles black unless explicitly styled.)
-        self.setStyleSheet(
-            (self.styleSheet() or "")
-            + "\n" +
-            "QGroupBox { color: #FFFFFF; border: 1px solid #76797C; border-radius: 5px; margin-top: 14px; }\n"
-            "QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; left: 10px; padding: 0 6px; color: #FFFFFF; }\n"
-            "QPlainTextEdit { background-color: #212121; color: #FFFFFF; border: 1px solid #76797C; border-radius: 5px; }\n"
-            "QTabWidget::pane { background-color: #414141; border: 1px solid #76797C; border-radius: 5px; }\n"
-        )
 
         # -----------------------------
         # Logs (right column, under controls)
@@ -1404,14 +1394,14 @@ class ServiceManagerDialog(QDialog):
         self._tabs.addTab(self._txt_out, "Stdout")
         self._tabs.addTab(self._txt_err, "Stderr")
 
-        logs_box = QGroupBox("Logs")
+        logs_box = QGroupBox()
         logs_layout = QVBoxLayout(logs_box)
         logs_layout.addWidget(self._tabs)
 
         # -----------------------------
         # Controls (right column)
         # -----------------------------
-        controls = QGroupBox("Controls")
+        controls = QGroupBox()
         self._controls_layout = QHBoxLayout(controls)
         self._controls_layout.setSpacing(10)
         self._controls_layout.setContentsMargins(10, 10, 10, 10)
@@ -1450,7 +1440,7 @@ class ServiceManagerDialog(QDialog):
         self._lbl_stdout = QLabel("")
         self._lbl_stderr = QLabel("")
 
-        status_box = QGroupBox("Status")
+        status_box = QGroupBox()
         status_form = QFormLayout(status_box)
         status_form.addRow("Application:", self._lbl_name)
         status_form.addRow("Service label:", self._lbl_label)

@@ -362,7 +362,7 @@
 		</data>
 		<key>Resources/base_library.zip</key>
 		<data>
-		JLGnROQMLM74qb8adQiiXhCu47g=
+		Jr6gztwy0JEF6L+ZHJu17ujmc7o=
 		</data>
 		<key>Resources/bin/nssm/windows/x86/nssm.exe</key>
 		<data>
@@ -482,7 +482,7 @@
 		</data>
 		<key>Resources/core/__pycache__/service.cpython-311.pyc</key>
 		<data>
-		L4S9ibddBMsYpavVkVrZitXuRQk=
+		HHnf6SmUew153jm5wgr5Sj6bKw4=
 		</data>
 		<key>Resources/core/__pycache__/service.cpython-312.pyc</key>
 		<data>
@@ -8962,7 +8962,7 @@
 		</data>
 		<key>Resources/core/service.py</key>
 		<data>
-		2XgRYVAzVuX5Iv7hxQwTl1+y2QA=
+		TfQRkS2pzEqi+Eyhe7R4g10mvbY=
 		</data>
 		<key>Resources/core/src/bin/nssm/windows/x86/nssm.exe</key>
 		<data>
@@ -8974,7 +8974,7 @@
 		</data>
 		<key>Resources/core/styles/style.css</key>
 		<data>
-		ytUi7eADBvcSDHKV03+aPlpG+II=
+		7eulFF3hzyRoZ9II9HF0nvPJEt0=
 		</data>
 		<key>Resources/core/ui.py</key>
 		<data>
@@ -10668,7 +10668,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			cwWTA36NXSXOPoEPAIo4zIrzx3UbvickeMlUJp7WhQc=
+			IG3j3OYkJzxbgVO4mbsI2Pe1699sqTsuuYu1AFYTQnU=
 			</data>
 		</dict>
 		<key>Resources/bin/nssm/windows/x86/nssm.exe</key>
@@ -10878,7 +10878,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			t4UTQYEzToDbheHqiGWQWiARyBFg4IXbCVscqdmXxB0=
+			4+mcEQE/m0qgD40iCxTfUdQ0cdcfD9Ot/sltF6YM7uw=
 			</data>
 		</dict>
 		<key>Resources/core/__pycache__/service.cpython-312.pyc</key>
@@ -25718,7 +25718,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			Tcmjp/F5MLXtw2ptl6Z7RKdoD07FeGiNkCeSCUZ/wio=
+			RNpM7u+p1lpzlFDEIty/K1yaRHP7TkXwnSJks/9uQ9w=
 			</data>
 		</dict>
 		<key>Resources/core/src/bin/nssm/windows/x86/nssm.exe</key>
@@ -25739,7 +25739,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			UyzqQUfd9LvsTnxZSFXTII0aNAcx0H4uYPTLaSPA3rA=
+			xXIAufPgAhlyDWCdwF/Q+hwz3UFmCbkjCTjp6b6bbOw=
 			</data>
 		</dict>
 		<key>Resources/core/ui.py</key>
