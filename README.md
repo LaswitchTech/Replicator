@@ -8,11 +8,15 @@
 ![Version](https://img.shields.io/github/v/release/LaswitchTech/Replicator?label=Version&style=for-the-badge)
 
 ## Description
-Replicator is a cross-platform Python application designed to provide replication services similar to Windows DFSR. It supports local filesystems, SMB, FTP and SSHFS, making it a versatile solution for data replication needs across different operating systems.
+Replicator is a cross-platform Python application designed to provide replication services similar to Windows DFSR. It supports local filesystems and SMB making it a versatile solution for data replication needs across different operating systems.
 
 ## Features
   - **Cross-Platform Compatibility**: Replicator is compatible with Windows, macOS and Linux, with specific adjustments made to ensure seamless operation on both operating systems.
-  - **Customizable Interface**: The application uses a customizable UI that allows users to define their preferred settings.
+  - **SMB Support**: The application can replicate data to and from SMB shares, making it suitable for networked environments.
+  - **Configurable Replication Modes**: Users can choose between different replication modes (e.g., Mirror, Incremental) to suit their specific needs.
+  - **Scheduling**: Replication tasks can be scheduled to run at specific times or intervals, allowing for automated data synchronization.
+  - **Conflict Resolution**: The application includes strategies for resolving conflicts that may arise during replication, ensuring data integrity and consistency.
+  - **Service Integration**: Replicator can be integrated with system services to run in the background, providing continuous replication without user intervention.
   - **Logging and Debugging**: The application includes logging features for easier debugging and tracking of issues during the replication process.
 
 ## License
