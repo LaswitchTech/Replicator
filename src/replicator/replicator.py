@@ -11,7 +11,7 @@ import shutil
 import time
 
 
-# Add datetime import for lastRun/lastResult
+
 from datetime import datetime, timezone, timedelta
 
 
@@ -109,6 +109,10 @@ class Replicator(QMainWindow):
 
         self._fs = FileSystem(helper=self._helper, logger=self._logger)
 
+        # Shared Share instance (for SMB mounts) so we don't recreate it on every job run.
+        self._share_logger = _ShareLogger(self._log)
+        self._share = Share(logger=self._share_logger)
+
         # --- Database path setup ---
         # Use Helper.get_data_path to locate data/replicator.db
         data_dir = self._helper.get_data_path("data", scope="system")
@@ -149,134 +153,28 @@ class Replicator(QMainWindow):
         except Exception:
             return None
 
-    def _window_allows_now_local(self, windows: Dict[str, Any], now_local: datetime) -> bool:
-        """
-        Determine if 'now_local' falls inside an allowed window for its weekday.
-        Windows are interpreted as LOCAL times (America/Montreal via system tz).
-        Supports overnight windows like 22:00-06:00.
+    def _should_run_scheduled(self, job: Job, *, now_utc: datetime) -> bool:
+        """Decide if a job should run in SERVICE/SCHEDULED mode.
 
-        Semantics (match `job.py`):
-          - windows is missing/None/not-a-dict => allowed (legacy/unrestricted)
-          - windows is an empty dict {} => NOT allowed ("run never" in service mode)
-        """
-        # Legacy/unrestricted: missing or invalid windows means "allowed".
-        if windows is None or not isinstance(windows, dict):
-            return True
-        # Explicitly configured but empty => run never.
-        if not windows:
-            return False
-
-        wd = now_local.weekday()  # 0..6 (Mon..Sun)
-        day_windows = windows.get(str(wd)) or windows.get(wd)
-        if not isinstance(day_windows, list) or not day_windows:
-            return False
-
-        tnow = now_local.time().replace(tzinfo=None)
-
-        def _parse_hhmm(val: Any) -> Optional[tuple[int, int]]:
-            try:
-                parts = str(val).strip().split(":")
-                if len(parts) != 2:
-                    return None
-                hh = int(parts[0]); mm = int(parts[1])
-                if hh < 0 or hh > 23 or mm < 0 or mm > 59:
-                    return None
-                return hh, mm
-            except Exception:
-                return None
-
-        for w in day_windows:
-            if not isinstance(w, dict):
-                continue
-            s = w.get("start"); e = w.get("end")
-            if not s or not e:
-                continue
-            ps = _parse_hhmm(s); pe = _parse_hhmm(e)
-            if ps is None or pe is None:
-                continue
-            sh, sm = ps; eh, em = pe
-            ts = datetime(2000, 1, 1, sh, sm).time()
-            te = datetime(2000, 1, 1, eh, em).time()
-
-            if ts <= te:
-                if ts <= tnow <= te:
-                    return True
-            else:
-                # overnight
-                if tnow >= ts or tnow <= te:
-                    return True
-
-        return False
-
-    def _interval_seconds_for_schedule_row(self, sched_row: Dict[str, Any], now_local: datetime) -> int:
-        """
-        Return interval seconds for this schedule row.
-
-        Priority (match `job.py`):
-          1) windows[weekday][0].intervalSeconds
-          2) schedule.intervalSeconds column
-          3) service.defaultInterval
-        """
-        default_iv = self._default_interval_seconds()
-
-        # 1) Per-day window intervalSeconds
-        try:
-            windows = sched_row.get("windows") or {}
-            if isinstance(windows, str):
-                windows = json.loads(windows) if windows else {}
-            if isinstance(windows, dict) and windows:
-                wd = now_local.weekday()
-                day = windows.get(str(wd)) or windows.get(wd)
-                if isinstance(day, list) and day and isinstance(day[0], dict):
-                    v = day[0].get("intervalSeconds")
-                    if v is not None:
-                        iv = int(v or 0)
-                        if iv > 0:
-                            return iv
-        except Exception:
-            pass
-
-        # 2) schedule.intervalSeconds column
-        try:
-            col = sched_row.get("intervalSeconds")
-            if col is not None:
-                iv = int(col or 0)
-                if iv > 0:
-                    return iv
-        except Exception:
-            pass
-
-        return default_iv
-
-    def _should_run_scheduled(self, job: Job, *, now_utc: datetime, now_local: datetime) -> bool:
-        """
-        Decide if a job should run in SERVICE/SCHEDULED mode.
         Manual 'Run now' intentionally bypasses this.
         """
         if not job.id:
             return False
 
         sched = self._db.one(
-            "SELECT enabled, nextRunAt, lastScheduledRunAt, windows, intervalSeconds FROM schedule WHERE jobId=?",
+            "SELECT enabled, nextRunAt, lastScheduledRunAt FROM schedule WHERE jobId=?",
             (int(job.id),),
         )
         if not sched:
             # No schedule row => do not auto-run (manual run still works)
             return False
 
+        # Schedule must be explicitly enabled in DB
         if not bool(sched.get("enabled", 0)):
             return False
 
-        # windows are local-time based
-        windows: Dict[str, Any] = {}
-        try:
-            raw = sched.get("windows")
-            if raw:
-                windows = json.loads(raw) if isinstance(raw, str) else (raw if isinstance(raw, dict) else {})
-        except Exception:
-            windows = {}
-
-        if not self._window_allows_now_local(windows, now_local):
+        # Schedule windows/interval are defined on the Job domain object
+        if not job.schedule.should_run_now(now_utc):
             return False
 
         # Respect nextRunAt if present
@@ -284,12 +182,14 @@ class Replicator(QMainWindow):
         if next_dt and now_utc < next_dt:
             return False
 
-        interval_s = self._interval_seconds_for_schedule_row(sched, now_local)
+        # Respect lastScheduledRunAt + interval
         last_dt = self._parse_iso_dt(sched.get("lastScheduledRunAt"))
-
         if last_dt is None:
-            # first scheduled run in an allowed window
             return True
+
+        interval_s = int(job.schedule.interval_seconds_for_now(now_utc) or 0)
+        if interval_s <= 0:
+            interval_s = self._default_interval_seconds()
 
         elapsed = (now_utc - last_dt).total_seconds()
         return elapsed >= float(interval_s)
@@ -933,34 +833,19 @@ class Replicator(QMainWindow):
         for wd in range(7):
             windows[str(wd)] = [{"start": "00:00", "end": "23:59", "intervalSeconds": interval}]
         return {
-            "enabled": True,
+            "enabled": False,
             "intervalSeconds": interval,
             "windows": windows,
         }
 
     def _schedule_interval_seconds_for_now(self, sched: Dict[str, Any]) -> int:
-        """Best-effort interval seconds for logging (supports per-day interval stored in window dicts)."""
+        # Kept for backward compatibility with existing log formatting.
+        # Prefer the Job/Schedule domain helpers where possible.
         try:
-            windows = sched.get("windows") if isinstance(sched.get("windows"), dict) else {}
-            wd = datetime.now().astimezone().weekday()
-            day = windows.get(str(wd)) or windows.get(wd)  # type: ignore[index]
-            if isinstance(day, list) and day and isinstance(day[0], dict):
-                v = day[0].get("intervalSeconds")
-                if v is not None:
-                    return int(v)
+            j = self._job_from_legacy_dict({"schedule": sched, "name": "_tmp", "enabled": True, "sourceEndpoint": {"type": "local", "location": "/"}, "targetEndpoint": {"type": "local", "location": "/"}})
+            return int(j.schedule.interval_seconds_for_now(datetime.now(timezone.utc)) or 0) or self._default_interval_seconds()
         except Exception:
-            pass
-
-        default_interval = self._default_interval_seconds()
-
-        try:
-            if "intervalSeconds" in sched:
-                v = int(sched.get("intervalSeconds") or 0)
-                return v if v > 0 else default_interval
-        except Exception:
-            pass
-
-        return default_interval
+            return self._default_interval_seconds()
 
     def _job_from_legacy_dict(self, d: Dict[str, Any], *, existing_id: Optional[int] = None) -> Job:
         src = d.get("sourceEndpoint") or {"type": "local", "location": d.get("source", ""), "auth": {}}
@@ -1028,7 +913,7 @@ class Replicator(QMainWindow):
         windows = sched.get("windows") if isinstance(sched.get("windows"), dict) else {}
 
         j.schedule = Schedule(
-            enabled=bool(sched.get("enabled", True)),
+            enabled=bool(sched.get("enabled", False)),
             intervalSeconds=int(iv),
             windows=windows,
         )
@@ -1150,7 +1035,6 @@ class Replicator(QMainWindow):
             return False
 
         now_utc = datetime.now(timezone.utc)
-        now_local = now_utc.astimezone()  # interpret windows as local times
 
         any_ran = False
         all_ok = True
@@ -1159,7 +1043,7 @@ class Replicator(QMainWindow):
             if not bool(job.enabled):
                 continue
 
-            if not self._should_run_scheduled(job, now_utc=now_utc, now_local=now_local):
+            if not self._should_run_scheduled(job, now_utc=now_utc):
                 continue
 
             any_ran = True
@@ -1172,7 +1056,7 @@ class Replicator(QMainWindow):
                     "SELECT enabled, nextRunAt, lastScheduledRunAt, windows, intervalSeconds FROM schedule WHERE jobId=?",
                     (int(job.id),),
                 ) or {}
-                interval_s = self._interval_seconds_for_schedule_row(sched_row, now_local)
+                interval_s = int(job.schedule.interval_seconds_for_now(datetime.now(timezone.utc)) or 0) or self._default_interval_seconds()
                 next_run = (datetime.now(timezone.utc) + timedelta(seconds=int(interval_s))).isoformat()
                 self._db.update(
                     "schedule",
@@ -1255,7 +1139,7 @@ class Replicator(QMainWindow):
         schedule = job.to_legacy_dict().get("schedule") or {}
 
         if not src or not dst:
-            self._log(f"[Replicator] Job '{name}' invalid: missing source/target.", level="error")
+            self._log(f"[Replicator] Job '{name}' invalid: missing source or target path (src='{src}', dst='{dst}').", level="error")
             return False
 
         sched_str = ""
@@ -1292,13 +1176,11 @@ class Replicator(QMainWindow):
             # Mount remote endpoints (SMB only) via Share so BOTH uni + bidi operate on
             # local filesystem paths, and we get connectivity debug logs.
             mounted: list[MountedEndpoint] = []
-            share_logger = _ShareLogger(self._log)
-            share = Share(logger=share_logger)
 
             try:
-                src_m = mount_endpoint_if_remote(src_ep, job_id, "source", share=share, log_append=self._log)
+                src_m = mount_endpoint_if_remote(src_ep, job_id, "source", share=self._share, log_append=self._log)
                 mounted.append(src_m)
-                dst_m = mount_endpoint_if_remote(dst_ep, job_id, "target", share=share, log_append=self._log)
+                dst_m = mount_endpoint_if_remote(dst_ep, job_id, "target", share=self._share, log_append=self._log)
                 mounted.append(dst_m)
 
                 # Use the mounted/local view for execution

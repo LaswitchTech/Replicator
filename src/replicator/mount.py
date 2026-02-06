@@ -39,6 +39,16 @@ import re
 import tempfile
 from urllib.parse import quote
 
+# corePY Share helper (import once at module import time)
+try:
+    from core.filesystem.share import Share, ShareAuth  # type: ignore
+except Exception as _e:  # pragma: no cover
+    Share = None  # type: ignore
+    ShareAuth = None  # type: ignore
+    _COREPY_SHARE_IMPORT_ERROR = _e
+else:
+    _COREPY_SHARE_IMPORT_ERROR = None
+
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -99,11 +109,17 @@ class MountedEndpoint:
     mount_point: Optional[str] = None
     share: Any = None  # Share instance (only present when mounted)
 
-    def cleanup(self) -> None:
-        """Unmount the share if mounted; best-effort."""
+    def cleanup(self, *, elevate: bool = False) -> None:
+        """Unmount the share if mounted; best-effort.
+
+        Notes
+        -----
+        Some platforms/targets may require elevation to unmount. We keep the
+        default as `False` to match current behavior; callers can opt-in.
+        """
         if self.share is not None and self.mount_point:
             try:
-                self.share.umount(self.mount_point, elevate=False)
+                self.share.umount(self.mount_point, elevate=bool(elevate))
             except Exception:
                 pass
 
@@ -167,6 +183,7 @@ def mount_endpoint_if_remote(
     *,
     share: Any = None,
     log_append: Optional[Callable[..., None]] = None,
+    logger: Any = None,
     timeout: int = 60,
 ) -> MountedEndpoint:
     """Mount an endpoint if it is remote; otherwise return the local path.
@@ -186,13 +203,36 @@ def mount_endpoint_if_remote(
     log_append:
         Function compatible with core Log.append(msg, level=..., channel=...).
         If provided, used for safe debug messages.
+    logger:
+        Backward-compatible alias used by some callers (e.g. job.py).
+        Can be either:
+          - an object exposing `.append(msg, level=...)` (core Log-like)
+          - a callable compatible with `log_append`
+        If provided and `log_append` is None, it will be used.
     """
 
-    # Lazy import to keep this module importable without corePY during tests.
-    try:
-        from core.filesystem.share import Share, ShareAuth  # type: ignore
-    except Exception as e:  # pragma: no cover
-        raise RemoteMountError(f"Share support not available: {e}")
+    # Share support is optional at import time; raise a meaningful error at runtime.
+    if Share is None or ShareAuth is None:
+        raise RemoteMountError(
+            "Share support not available (corePY missing or failed to import). "
+            f"Import error: {_COREPY_SHARE_IMPORT_ERROR}"
+        )
+
+    # Backward-compatible: allow callers to pass `logger=` instead of `log_append=`.
+    if log_append is None and logger is not None:
+        if callable(logger):
+            log_append = logger  # type: ignore[assignment]
+        else:
+            append_fn = getattr(logger, "append", None)
+            if callable(append_fn):
+                def _append(msg: str, *, level: str = "info") -> None:
+                    # core Log.append may accept (msg, level=..., channel=...) or (msg, level)
+                    try:
+                        append_fn(msg, level=level)  # type: ignore[misc]
+                    except TypeError:
+                        append_fn(msg, level)  # type: ignore[misc]
+
+                log_append = _append
 
     def _get(d: Any, k: str, default: Any = None) -> Any:
         if isinstance(d, dict):
@@ -248,12 +288,10 @@ def mount_endpoint_if_remote(
         domain=auth.get("domain") or auth.get("workgroup"),
     )
 
-    # Share instance (reuse if provided)
+    # Share instance (reuse if provided). If we create one here, wire it with our adapter.
     if share is None:
-        if log_append is not None:
-            share = Share(logger=ShareLoggerAdapter(log_append))
-        else:
-            share = Share(logger=None)
+        share_logger = ShareLoggerAdapter(log_append) if log_append is not None else None
+        share = Share(logger=share_logger)
 
     # Emit safe debug line
     if log_append is not None:
@@ -261,10 +299,15 @@ def mount_endpoint_if_remote(
         for k in ("password", "pass"):
             if k in safe_auth and safe_auth[k]:
                 safe_auth[k] = "***"
-        log_append(
-            f"[Replicator][Mount] protocol={t} host={host} remote={remote_enc} mount_point={mount_point} auth={safe_auth}",
-            level="debug",
+        msg = (
+            f"[Replicator][Mount] protocol={t} host={host} remote={remote_enc} "
+            f"mount_point={mount_point} auth={safe_auth}"
         )
+        try:
+            log_append(msg, level="debug")  # type: ignore[misc]
+        except TypeError:
+            # Some callables accept only positional args.
+            log_append(msg)  # type: ignore[misc]
 
     # Mount
     try:
