@@ -101,14 +101,7 @@ class Migration:
             try:
                 with self._db.transaction():
                     for stmt in stmts:
-                        try:
-                            self._db.execute(stmt)
-                        except Exception as e:
-                            # SQLite: ignore duplicate column errors when applying additive migrations on fresh schemas
-                            msg = str(e).lower()
-                            if "duplicate column name" in msg:
-                                continue
-                            raise
+                        self._db.execute(stmt)
                     self._db.execute("INSERT INTO schema_migrations (name) VALUES (?)", (name,))
 
                 self._log(f"[Migration] applied {name}", level="debug")
@@ -251,6 +244,37 @@ class Migration:
                         value TEXT NULL
                     );
                     """,
+                ],
+            ),
+            (
+                "0002_schedule_enabled_default_off",
+                [
+                    # SQLite cannot ALTER COLUMN defaults directly; rebuild the schedule table so
+                    # new rows default to enabled=0 while preserving existing data.
+                    "PRAGMA foreign_keys=OFF;",
+                    """
+                    CREATE TABLE IF NOT EXISTS schedule_new (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        created DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        modified DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        jobId INTEGER NOT NULL UNIQUE,
+                        -- Schedule is controlled via per-day windows and intervalSeconds.
+                        enabled INTEGER NOT NULL DEFAULT 0,
+                        intervalSeconds INTEGER NOT NULL DEFAULT 3600,
+                        nextRunAt TEXT NULL,
+                        lastScheduledRunAt TEXT NULL,
+                        windows TEXT NULL,
+                        FOREIGN KEY(jobId) REFERENCES jobs(id) ON DELETE CASCADE
+                    );
+                    """.strip(),
+                    """
+                    INSERT INTO schedule_new (id, created, modified, jobId, enabled, intervalSeconds, nextRunAt, lastScheduledRunAt, windows)
+                    SELECT id, created, modified, jobId, enabled, intervalSeconds, nextRunAt, lastScheduledRunAt, windows
+                    FROM schedule;
+                    """.strip(),
+                    "DROP TABLE schedule;",
+                    "ALTER TABLE schedule_new RENAME TO schedule;",
+                    "PRAGMA foreign_keys=ON;",
                 ],
             ),
         ]

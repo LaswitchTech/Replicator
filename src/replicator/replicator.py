@@ -8,16 +8,12 @@ from typing import Optional, Any, Dict, List
 import os
 import json
 import shutil
-import tempfile
 import time
-from pathlib import Path
 
 
 # Add datetime import for lastRun/lastResult
 from datetime import datetime, timezone, timedelta
 
-# For percent-encoding SMB remote paths
-from urllib.parse import quote
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QPixmap
@@ -37,6 +33,7 @@ from PyQt5.QtWidgets import (
 from .ui import JobDialog, ScheduleDialog
 from .migration import Migration
 from .job import Job, Endpoint, Schedule, JobStore
+from .mount import RemoteMountError, MountedEndpoint, mount_endpoint_if_remote
 
 
 try:
@@ -62,10 +59,6 @@ except ImportError:
 # Remote endpoints (Share mount)
 # ---------------------------------------------------------------------------
 
-class RemoteMountError(RuntimeError):
-    pass
-
-
 class _ShareLogger:
     """Adapter that forwards Share logs into Replicator's logger."""
 
@@ -83,130 +76,6 @@ class _ShareLogger:
 
     def error(self, msg: str) -> None:
         self._append(f"[Share] {msg}", level="error")
-
-
-class _MountedEndpoint:
-    def __init__(self, local_path: str, mount_point: str | None = None, share: Share | None = None):
-        self.local_path = local_path
-        self.mount_point = mount_point
-        self.share = share
-
-    def cleanup(self) -> None:
-        if self.share is not None and self.mount_point:
-            try:
-                self.share.umount(self.mount_point, elevate=False)
-            except Exception:
-                pass
-
-# --- Location parsing helpers for remote endpoints ---
-
-def _parse_smb_location(loc: str) -> tuple[str, str]:
-    """Parse SMB location into (host, remote).
-
-    Accepts forms:
-      - \\host\\Share
-      - \\host\\Share\\dir\\sub
-      - //host/Share/dir
-      - host/Share/dir
-    Returns:
-      host, remote where remote is "Share" or "Share/dir/sub".
-    """
-    s = (loc or "").strip()
-    s = s.replace("/", "\\")
-    while s.startswith("\\"):
-        s = s[1:]
-    parts = [p for p in s.split("\\") if p]
-    if len(parts) < 2:
-        raise RemoteMountError(f"Invalid SMB location: {loc}")
-    host = parts[0]
-    remote = "/".join(parts[1:])
-    return host, remote
-
-def _mount_endpoint_if_remote(
-    endpoint: dict[str, Any],
-    job_id: int | None,
-    role: str,
-    *,
-    share: Share,
-    log_append,
-) -> _MountedEndpoint:
-    """Mount SMB endpoints using Share and return a local path usable by the sync engine."""
-
-    t = (endpoint.get("type") or "local").lower()
-    loc = str(endpoint.get("location") or "").strip()
-
-    if t == "local":
-        return _MountedEndpoint(local_path=loc)
-
-    if t != "smb":
-        raise RemoteMountError(f"Unsupported endpoint type: {t}")
-
-    base = Path(tempfile.gettempdir()) / "replicator" / "mounts" / (str(job_id or "new")) / role
-    base.mkdir(parents=True, exist_ok=True)
-    mount_point = str(base)
-
-    # Build auth/options payload (do NOT log secrets)
-    auth: dict[str, Any] = {}
-    if isinstance(endpoint.get("auth"), dict):
-        auth.update(endpoint.get("auth") or {})
-
-    # Backward-compatible: endpoints table columns may be stored at top-level
-    for k in ("port", "guest", "username", "password", "options"):
-        if k in endpoint and endpoint.get(k) is not None and k not in auth:
-            auth[k] = endpoint.get(k)
-
-    # Build ShareAuth object
-    share_auth = ShareAuth(
-        username=auth.get("username"),
-        password=auth.get("password"),
-        domain=auth.get("domain") or auth.get("workgroup"),
-    )
-
-    # Parse host and remote from location (SMB only)
-    host, remote = _parse_smb_location(loc)
-    # mount_smbfs (used by Share on macOS) expects a URL-like remote; spaces and other
-    # characters must be percent-encoded, but keep '/' separators intact.
-    remote = quote(remote, safe="/")
-
-    # Determine port and options
-    port = None
-    try:
-        if auth.get("port") is not None:
-            port = int(auth.get("port"))
-    except Exception:
-        port = None
-    if port is None:
-        port = 445
-
-    opts = {}
-    if isinstance(auth.get("options"), dict):
-        opts.update(auth.get("options") or {})
-
-    # Emit a safe debug line (mask secrets, include host/remote)
-    safe_auth = dict(auth)
-    for k in ("password", "pass"):
-        if k in safe_auth and safe_auth[k]:
-            safe_auth[k] = "***"
-    log_append(
-        f"[Replicator][Share] mount protocol={t} host={host} remote={remote} mount_point={mount_point} auth={safe_auth}",
-        level="debug",
-    )
-
-    # Call Share.mount with correct signature
-    share.mount(
-        t,
-        host,
-        remote,
-        mount_point,
-        auth=share_auth,
-        port=port,
-        options=opts,
-        read_only=bool(auth.get("read_only") or auth.get("ro") or False),
-        elevate=False,
-        timeout=60,
-    )
-
-    return _MountedEndpoint(local_path=mount_point, mount_point=mount_point, share=share)
 
 
 class Replicator(QMainWindow):
@@ -285,10 +154,17 @@ class Replicator(QMainWindow):
         Determine if 'now_local' falls inside an allowed window for its weekday.
         Windows are interpreted as LOCAL times (America/Montreal via system tz).
         Supports overnight windows like 22:00-06:00.
-        If windows is empty/missing => allowed.
+
+        Semantics (match `job.py`):
+          - windows is missing/None/not-a-dict => allowed (legacy/unrestricted)
+          - windows is an empty dict {} => NOT allowed ("run never" in service mode)
         """
-        if not windows or not isinstance(windows, dict):
+        # Legacy/unrestricted: missing or invalid windows means "allowed".
+        if windows is None or not isinstance(windows, dict):
             return True
+        # Explicitly configured but empty => run never.
+        if not windows:
+            return False
 
         wd = now_local.weekday()  # 0..6 (Mon..Sun)
         day_windows = windows.get(str(wd)) or windows.get(wd)
@@ -335,27 +211,20 @@ class Replicator(QMainWindow):
     def _interval_seconds_for_schedule_row(self, sched_row: Dict[str, Any], now_local: datetime) -> int:
         """
         Return interval seconds for this schedule row.
-        Priority:
-          1) schedule.intervalSeconds column
-          2) windows[weekday][0].intervalSeconds
+
+        Priority (match `job.py`):
+          1) windows[weekday][0].intervalSeconds
+          2) schedule.intervalSeconds column
           3) service.defaultInterval
         """
         default_iv = self._default_interval_seconds()
 
-        try:
-            col = sched_row.get("intervalSeconds")
-            if col is not None:
-                iv = int(col or 0)
-                if iv > 0:
-                    return iv
-        except Exception:
-            pass
-
+        # 1) Per-day window intervalSeconds
         try:
             windows = sched_row.get("windows") or {}
             if isinstance(windows, str):
                 windows = json.loads(windows) if windows else {}
-            if isinstance(windows, dict):
+            if isinstance(windows, dict) and windows:
                 wd = now_local.weekday()
                 day = windows.get(str(wd)) or windows.get(wd)
                 if isinstance(day, list) and day and isinstance(day[0], dict):
@@ -364,6 +233,16 @@ class Replicator(QMainWindow):
                         iv = int(v or 0)
                         if iv > 0:
                             return iv
+        except Exception:
+            pass
+
+        # 2) schedule.intervalSeconds column
+        try:
+            col = sched_row.get("intervalSeconds")
+            if col is not None:
+                iv = int(col or 0)
+                if iv > 0:
+                    return iv
         except Exception:
             pass
 
@@ -1405,42 +1284,46 @@ class Replicator(QMainWindow):
 
         ok = False
         try:
-            if str(direction).lower() == "bidirectional":
-                # Mount remote endpoints (SMB only) via Share so the bidirectional engine can
-                # operate on local filesystem paths AND we get proper connectivity debug logs.
-                mounted: list[_MountedEndpoint] = []
-                job_dict = job.to_legacy_dict()
+            # Always build a legacy dict so we can reuse the endpoint records + auth.
+            job_dict = job.to_legacy_dict()
+            src_ep = job_dict.get("sourceEndpoint") or {"type": "local", "location": src, "auth": {}}
+            dst_ep = job_dict.get("targetEndpoint") or {"type": "local", "location": dst, "auth": {}}
 
-                src_ep = job_dict.get("sourceEndpoint") or {"type": "local", "location": src, "auth": {}}
-                dst_ep = job_dict.get("targetEndpoint") or {"type": "local", "location": dst, "auth": {}}
+            # Mount remote endpoints (SMB only) via Share so BOTH uni + bidi operate on
+            # local filesystem paths, and we get connectivity debug logs.
+            mounted: list[MountedEndpoint] = []
+            share_logger = _ShareLogger(self._log)
+            share = Share(logger=share_logger)
 
-                share_logger = _ShareLogger(self._log)
-                share = Share(logger=share_logger)
-
-                src_m = _mount_endpoint_if_remote(src_ep, job_id, "source", share=share, log_append=self._log)
+            try:
+                src_m = mount_endpoint_if_remote(src_ep, job_id, "source", share=share, log_append=self._log)
                 mounted.append(src_m)
-                dst_m = _mount_endpoint_if_remote(dst_ep, job_id, "target", share=share, log_append=self._log)
+                dst_m = mount_endpoint_if_remote(dst_ep, job_id, "target", share=share, log_append=self._log)
                 mounted.append(dst_m)
 
-                # Local view for the bidirectional sync engine
-                job_dict["sourceEndpoint"] = {"type": "local", "location": src_m.local_path, "auth": {}}
-                job_dict["targetEndpoint"] = {"type": "local", "location": dst_m.local_path, "auth": {}}
+                # Use the mounted/local view for execution
+                local_src = src_m.local_path
+                local_dst = dst_m.local_path
 
-                try:
+                if str(direction).lower() == "bidirectional":
+                    # Local view for the bidirectional sync engine
+                    job_dict["sourceEndpoint"] = {"type": "local", "location": local_src, "auth": {}}
+                    job_dict["targetEndpoint"] = {"type": "local", "location": local_dst, "auth": {}}
                     ok, bidi_stats = self._run_job_bidirectional(job_dict, run_id)
-                finally:
-                    for m in reversed(mounted):
-                        try:
-                            m.cleanup()
-                        except Exception:
-                            pass
-            else:
-                ok = self._fs.copy(
-                    src,
-                    dst,
-                    preserve_metadata=preserve_metadata,
-                    allow_deletion=allow_deletion,
-                )
+                else:
+                    # Unidirectional copy (mirror) also uses mounted/local paths
+                    ok = self._fs.copy(
+                        local_src,
+                        local_dst,
+                        preserve_metadata=preserve_metadata,
+                        allow_deletion=allow_deletion,
+                    )
+            finally:
+                for m in reversed(mounted):
+                    try:
+                        m.cleanup()
+                    except Exception:
+                        pass
         except NotImplementedError as e:
             self._log(f"[Replicator] Job '{name}' not supported: {e}", level="error")
             ok = False

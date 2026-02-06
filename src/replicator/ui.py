@@ -167,8 +167,19 @@ class JobDialog(QDialog):
         # Mode + Direction on same line
         # ------------------------------
         self.mode = QComboBox()
-        self.mode.addItems(["mirror"])
-        mode_val = job.get("mode", "mirror")
+        # Mode is now a first-class control.
+        # mirror      => allowDeletion=True
+        # incremental => allowDeletion=False
+        self.mode.addItems(["mirror", "incremental"])
+
+        # Backward compatibility:
+        # - Older jobs may only have allowDeletion without a mode.
+        # - Some jobs may still have mode="mirror".
+        mode_val = str(job.get("mode") or "").strip().lower()
+        if mode_val not in ("mirror", "incremental"):
+            # Infer from allowDeletion when mode is missing/legacy.
+            mode_val = "mirror" if bool(job.get("allowDeletion", False)) else "incremental"
+
         idx = self.mode.findText(mode_val)
         if idx >= 0:
             self.mode.setCurrentIndex(idx)
@@ -206,15 +217,16 @@ class JobDialog(QDialog):
         # Other options
         # ------------------------------
         opts_row = QHBoxLayout()
-        self.allow_deletion = QCheckBox("Allow deletion")
-        self.allow_deletion.setChecked(bool(job.get("allowDeletion", False)))
+
+        # Deletion behavior is controlled by mode now.
+        # Keep the UI simple: show metadata + enabled toggles here.
         self.preserve_metadata = QCheckBox("Preserve metadata")
         self.preserve_metadata.setChecked(bool(job.get("preserveMetadata", True)))
         self.enabled = QCheckBox("Enabled")
         self.enabled.setChecked(bool(job.get("enabled", True)))
-        opts_row.addWidget(self.allow_deletion)
-        opts_row.addSpacing(16)
+
         opts_row.addWidget(self.preserve_metadata)
+        opts_row.addSpacing(16)
         opts_row.addWidget(self.enabled)
         opts_row.addStretch(1)
 
@@ -365,7 +377,7 @@ class JobDialog(QDialog):
         smb_form = QFormLayout(smb_wrap)
         smb_form.setContentsMargins(0, 0, 0, 0)
         smb_guest = QCheckBox("Login as Guest")
-        smb_user_lbl = QLabel("Username")
+        smb_user_lbl = QLabel("Username (user or user@domain)")
         smb_username = QLineEdit()
         smb_pass_lbl = QLabel("Password")
         smb_password = QLineEdit()
@@ -442,10 +454,6 @@ class JobDialog(QDialog):
         # Show only the relevant auth section
         if typ == "smb":
             widgets["smb"]["wrap"].setVisible(True)
-            w = widgets["smb"]
-            if w["guest"].isChecked() is False:
-                if not w["username"].text().strip() and not w["password"].text().strip():
-                    w["guest"].setChecked(True)
 
         auth_widget.adjustSize()
         if auth_widget.parentWidget() is not None:
@@ -477,15 +485,31 @@ class JobDialog(QDialog):
         if src_type == "smb":
             w = self._source_auth_widgets["smb"]
             if not w["guest"].isChecked():
+                # Either Guest is enabled OR both username+password are provided.
+                # If either field is missing, force Guest and block save.
                 if not w["username"].text().strip() or not w["password"].text().strip():
-                    MsgBox.show(self, "Job", "Source username and password are required.", icon="warning")
+                    w["guest"].setChecked(True)
+                    MsgBox.show(
+                        self,
+                        "Job",
+                        "For the Source SMB endpoint, either enable Guest or provide BOTH a username and a password.",
+                        icon="warning",
+                    )
                     return
 
         if tgt_type == "smb":
             w = self._target_auth_widgets["smb"]
             if not w["guest"].isChecked():
+                # Either Guest is enabled OR both username+password are provided.
+                # If either field is missing, force Guest and block save.
                 if not w["username"].text().strip() or not w["password"].text().strip():
-                    MsgBox.show(self, "Job", "Target username and password are required.", icon="warning")
+                    w["guest"].setChecked(True)
+                    MsgBox.show(
+                        self,
+                        "Job",
+                        "For the Destination SMB endpoint, either enable Guest or provide BOTH a username and a password.",
+                        icon="warning",
+                    )
                     return
 
         self.accept()
@@ -504,10 +528,12 @@ class JobDialog(QDialog):
                 auth = {}
             elif typ == "smb":
                 w = widgets["smb"]
+                guest = bool(w["guest"].isChecked())
+                # If Guest is enabled, credentials are irrelevant; clear them on save.
                 auth = {
-                    "guest": bool(w["guest"].isChecked()),
-                    "username": w["username"].text().strip(),
-                    "password": w["password"].text(),
+                    "guest": guest,
+                    "username": "" if guest else w["username"].text().strip(),
+                    "password": "" if guest else w["password"].text(),
                 }
             else:
                 # Unsupported/legacy types fall back to local
@@ -525,7 +551,8 @@ class JobDialog(QDialog):
             "targetEndpoint": target_ep,
             "source": source_ep["location"],  # backward compatibility
             "target": target_ep["location"],  # backward compatibility
-            "allowDeletion": bool(self.allow_deletion.isChecked()),
+            # Backward compatible field: allowDeletion derives from mode.
+            "allowDeletion": bool((self.mode.currentText() or "").lower() == "mirror"),
             "preserveMetadata": bool(self.preserve_metadata.isChecked()),
             "mode": self.mode.currentText(),
             "direction": self.direction.currentText(),
@@ -539,7 +566,7 @@ class JobDialog(QDialog):
                 val["schedule"] = sched
 
         return val
-
+    # Remove any remaining references to self.allow_deletion in this class.
 
 # ------------------------------------------------------------------
 # Schedule Dialog
@@ -584,25 +611,32 @@ class ScheduleDialog(QDialog):
 
         job = job or {}
         schedule = job.get("schedule") if isinstance(job.get("schedule"), dict) else {}
+
+        # IMPORTANT semantics:
+        # - schedule.enabled == False => job can be run manually but will NOT be executed by the service.
+        # - schedule.enabled == True  => job may run in the service, but ONLY within selected day windows.
+        # - enabled with no days selected means "run never" (no service runs).
+
         if not schedule:
-            # Default schedule: enabled, every day, all day, default interval
+            # New schedule default: enabled, every day, all day, default interval
             schedule = {"enabled": True, "intervalSeconds": int(self._default_interval_seconds), "windows": {}}
             for wd in range(7):
-                schedule["windows"][str(wd)] = [{"start": "00:00", "end": "23:59", "intervalSeconds": int(self._default_interval_seconds)}]
+                schedule["windows"][str(wd)] = [
+                    {"start": "00:00", "end": "23:59", "intervalSeconds": int(self._default_interval_seconds)}
+                ]
         else:
-            # Ensure windows exists; if missing, default to every day all day
-            if not isinstance(schedule.get("windows"), dict) or not schedule.get("windows"):
+            # Existing schedule: preserve intent.
+            # If windows is missing/empty, DO NOT auto-populate days (that would change meaning).
+            if not isinstance(schedule.get("windows"), dict):
                 schedule["windows"] = {}
-                for wd in range(7):
-                    schedule["windows"][str(wd)] = [{"start": "00:00", "end": "23:59", "intervalSeconds": int(schedule.get("intervalSeconds") or self._default_interval_seconds)}]
-            else:
-                # Ensure each day window has intervalSeconds
-                try:
-                    for _k, _v in list(schedule["windows"].items()):
-                        if isinstance(_v, list) and _v and isinstance(_v[0], dict) and "intervalSeconds" not in _v[0]:
-                            _v[0]["intervalSeconds"] = int(schedule.get("intervalSeconds") or self._default_interval_seconds)
-                except Exception:
-                    pass
+
+            # Ensure each existing day window has intervalSeconds
+            try:
+                for _k, _v in list(schedule["windows"].items()):
+                    if isinstance(_v, list) and _v and isinstance(_v[0], dict) and "intervalSeconds" not in _v[0]:
+                        _v[0]["intervalSeconds"] = int(schedule.get("intervalSeconds") or self._default_interval_seconds)
+            except Exception:
+                pass
 
         self._windows: Dict[str, Any] = schedule.get("windows", {}) if isinstance(schedule.get("windows", {}), dict) else {}
 
@@ -617,6 +651,11 @@ class ScheduleDialog(QDialog):
         self.enabled.setChecked(bool(schedule.get("enabled", False)))
 
         form.addRow("Enabled", self.enabled)
+
+        hint = QLabel("Tip: Enable the schedule to allow service runs. If enabled and no days are selected, the job will not run in the service.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("opacity: 0.75;")
+        layout.addWidget(hint)
 
         # Windows editor
         win_frame = QFrame()
@@ -738,6 +777,10 @@ class ScheduleDialog(QDialog):
 
     def _on_ok(self):
         if self.enabled.isChecked():
+            any_day = any(bool(ctrls["enabled"].isChecked()) for _wd, ctrls in self._day_controls.items())
+            if not any_day:
+                MsgBox.show(self, "Schedule", "Select at least one day when the schedule is enabled (otherwise the job will never run in the service).", icon="warning")
+                return
             for _wd, ctrls in self._day_controls.items():
                 if not ctrls["enabled"].isChecked():
                     continue
