@@ -2,19 +2,12 @@
 # src/replicator/replicator.py
 
 from __future__ import annotations
-
-from typing import Optional, Any, Dict, List
-
 import os
 import json
 import shutil
 import time
-
-
-
+from typing import Optional, Any, Dict, List
 from datetime import datetime, timezone, timedelta
-
-
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import (
@@ -29,12 +22,10 @@ from PyQt5.QtWidgets import (
     QHeaderView,
     QDialog,
 )
-
 from .ui import JobDialog, ScheduleDialog
 from .migration import Migration
 from .job import Job, Endpoint, Schedule, JobStore
 from .mount import RemoteMountError, MountedEndpoint, mount_endpoint_if_remote
-
 
 try:
     from core.helper import Helper
@@ -52,8 +43,6 @@ except ImportError:
     from filesystem.filesystem import FileSystem
     from filesystem.share import Share, ShareAuth
     from database.sqlite import SQLite
-
-
 
 # ---------------------------------------------------------------------------
 # Remote endpoints (Share mount)
@@ -76,7 +65,6 @@ class _ShareLogger:
 
     def error(self, msg: str) -> None:
         self._append(f"[Share] {msg}", level="error")
-
 
 class Replicator(QMainWindow):
 
@@ -393,7 +381,8 @@ class Replicator(QMainWindow):
         a_root = self._endpoint_local_root(src_ep)
         b_root = self._endpoint_local_root(dst_ep)
 
-        allow_deletion = bool(job.get("allowDeletion", False))
+        # Deletion behavior is derived from mode; mirror allows deletions.
+        allow_deletion = str(job.get("mode") or "mirror").lower() == "mirror"
         preserve_metadata = bool(job.get("preserveMetadata", True))
         conflict_policy = (job.get("conflictPolicy") or "newest").lower()
 
@@ -735,7 +724,9 @@ class Replicator(QMainWindow):
 
         # Ensure columns never shrink below their content (use scrollbar for overflow)
         header = self._table.horizontalHeader()
-        for i in range(self._table.columnCount()):
+        # Performance: ResizeToContents on every column can get painfully slow.
+        header.setSectionResizeMode(0, QHeaderView.Stretch)  # Name
+        for i in range(1, self._table.columnCount()):
             header.setSectionResizeMode(i, QHeaderView.ResizeToContents)
 
         # Keep horizontal scrollbar available for overflow
@@ -763,7 +754,6 @@ class Replicator(QMainWindow):
 
         self._reload_jobs()
         self._on_selection_changed()
-
 
     def _on_selection_changed(self, *_args):
         has = self._selected_index() >= 0
@@ -890,7 +880,8 @@ class Replicator(QMainWindow):
             enabled=bool(d.get("enabled", True)),
             mode=str(d.get("mode") or "mirror"),
             direction=str(d.get("direction") or "unidirectional"),
-            allowDeletion=bool(d.get("allowDeletion", False)),
+            # Deletion behavior is derived from mode; mirror allows deletions.
+            allowDeletion=(str(d.get("mode") or "mirror").lower() == "mirror"),
             preserveMetadata=bool(d.get("preserveMetadata", True)),
             conflictPolicy=str(d.get("conflictPolicy") or "newest"),
             pairId=d.get("pairId"),
@@ -983,7 +974,23 @@ class Replicator(QMainWindow):
         )
         if choice == "Delete":
             if job.id:
-                self._store.delete(int(job.id))
+                jid = int(job.id)
+                try:
+                    with self._db.transaction():
+                        # Explicitly delete dependent rows to avoid orphans.
+                        self._db.execute("DELETE FROM endpoints WHERE jobId = ?", (jid,))
+                        self._db.execute("DELETE FROM schedule WHERE jobId = ?", (jid,))
+                        self._db.execute("DELETE FROM runs WHERE jobId = ?", (jid,))
+                        self._db.execute("DELETE FROM conflicts WHERE jobId = ?", (jid,))
+                        self._db.execute("DELETE FROM file_state WHERE jobId = ?", (jid,))
+                        self._db.execute("DELETE FROM jobs WHERE id = ?", (jid,))
+                except Exception as e:
+                    self._log(f"[Replicator][DB] Failed to delete job {jid} cascade: {e}", level="warning")
+                    # Fallback to store deletion if cascade failed.
+                    try:
+                        self._store.delete(jid)
+                    except Exception:
+                        pass
             self._reload_jobs()
 
     def _edit_schedule(self):
@@ -1052,10 +1059,6 @@ class Replicator(QMainWindow):
 
             # Update schedule bookkeeping for this job
             try:
-                sched_row = self._db.one(
-                    "SELECT enabled, nextRunAt, lastScheduledRunAt, windows, intervalSeconds FROM schedule WHERE jobId=?",
-                    (int(job.id),),
-                ) or {}
                 interval_s = int(job.schedule.interval_seconds_for_now(datetime.now(timezone.utc)) or 0) or self._default_interval_seconds()
                 next_run = (datetime.now(timezone.utc) + timedelta(seconds=int(interval_s))).isoformat()
                 self._db.update(
@@ -1132,20 +1135,28 @@ class Replicator(QMainWindow):
         src_type = job.sourceEndpoint.type
         dst = job.targetEndpoint.location
         dst_type = job.targetEndpoint.type
-        allow_deletion = bool(job.allowDeletion)
-        preserve_metadata = bool(job.preserveMetadata)
         mode = job.mode
+        # Deletion behavior is derived from mode; mirror allows deletions.
+        allow_deletion = str(mode or "mirror").lower() == "mirror"
+        preserve_metadata = bool(job.preserveMetadata)
         direction = job.direction
-        schedule = job.to_legacy_dict().get("schedule") or {}
 
         if not src or not dst:
             self._log(f"[Replicator] Job '{name}' invalid: missing source or target path (src='{src}', dst='{dst}').", level="error")
             return False
 
         sched_str = ""
-        if isinstance(schedule, dict) and bool(schedule.get("enabled", True)):
-            interval_s = self._schedule_interval_seconds_for_now(schedule)
-            sched_str = f", schedule=Interval {interval_s}s"
+        try:
+            if job_id:
+                sched = self._db.one(
+                    "SELECT enabled FROM schedule WHERE jobId=?",
+                    (int(job_id),),
+                )
+                if sched and bool(sched.get("enabled", 0)):
+                    interval_s = int(job.schedule.interval_seconds_for_now(datetime.now(timezone.utc)) or 0) or self._default_interval_seconds()
+                    sched_str = f", schedule=Interval {interval_s}s"
+        except Exception:
+            pass
         logline = f"[Replicator] Running job '{name}': {src} -> {dst} (mode={mode}, direction={direction}, delete={allow_deletion}, meta={preserve_metadata}{sched_str}"
         logline += f", srcType={src_type}, dstType={dst_type})"
         self._log(logline)

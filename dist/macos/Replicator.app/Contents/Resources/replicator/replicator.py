@@ -2,23 +2,12 @@
 # src/replicator/replicator.py
 
 from __future__ import annotations
-
-from typing import Optional, Any, Dict, List
-
 import os
 import json
 import shutil
-import tempfile
 import time
-from pathlib import Path
-
-
-# Add datetime import for lastRun/lastResult
+from typing import Optional, Any, Dict, List
 from datetime import datetime, timezone, timedelta
-
-# For percent-encoding SMB remote paths
-from urllib.parse import quote
-
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import (
@@ -33,11 +22,10 @@ from PyQt5.QtWidgets import (
     QHeaderView,
     QDialog,
 )
-
 from .ui import JobDialog, ScheduleDialog
 from .migration import Migration
 from .job import Job, Endpoint, Schedule, JobStore
-
+from .mount import RemoteMountError, MountedEndpoint, mount_endpoint_if_remote
 
 try:
     from core.helper import Helper
@@ -56,15 +44,9 @@ except ImportError:
     from filesystem.share import Share, ShareAuth
     from database.sqlite import SQLite
 
-
-
 # ---------------------------------------------------------------------------
 # Remote endpoints (Share mount)
 # ---------------------------------------------------------------------------
-
-class RemoteMountError(RuntimeError):
-    pass
-
 
 class _ShareLogger:
     """Adapter that forwards Share logs into Replicator's logger."""
@@ -83,131 +65,6 @@ class _ShareLogger:
 
     def error(self, msg: str) -> None:
         self._append(f"[Share] {msg}", level="error")
-
-
-class _MountedEndpoint:
-    def __init__(self, local_path: str, mount_point: str | None = None, share: Share | None = None):
-        self.local_path = local_path
-        self.mount_point = mount_point
-        self.share = share
-
-    def cleanup(self) -> None:
-        if self.share is not None and self.mount_point:
-            try:
-                self.share.umount(self.mount_point, elevate=False)
-            except Exception:
-                pass
-
-# --- Location parsing helpers for remote endpoints ---
-
-def _parse_smb_location(loc: str) -> tuple[str, str]:
-    """Parse SMB location into (host, remote).
-
-    Accepts forms:
-      - \\host\\Share
-      - \\host\\Share\\dir\\sub
-      - //host/Share/dir
-      - host/Share/dir
-    Returns:
-      host, remote where remote is "Share" or "Share/dir/sub".
-    """
-    s = (loc or "").strip()
-    s = s.replace("/", "\\")
-    while s.startswith("\\"):
-        s = s[1:]
-    parts = [p for p in s.split("\\") if p]
-    if len(parts) < 2:
-        raise RemoteMountError(f"Invalid SMB location: {loc}")
-    host = parts[0]
-    remote = "/".join(parts[1:])
-    return host, remote
-
-def _mount_endpoint_if_remote(
-    endpoint: dict[str, Any],
-    job_id: int | None,
-    role: str,
-    *,
-    share: Share,
-    log_append,
-) -> _MountedEndpoint:
-    """Mount SMB endpoints using Share and return a local path usable by the sync engine."""
-
-    t = (endpoint.get("type") or "local").lower()
-    loc = str(endpoint.get("location") or "").strip()
-
-    if t == "local":
-        return _MountedEndpoint(local_path=loc)
-
-    if t != "smb":
-        raise RemoteMountError(f"Unsupported endpoint type: {t}")
-
-    base = Path(tempfile.gettempdir()) / "replicator" / "mounts" / (str(job_id or "new")) / role
-    base.mkdir(parents=True, exist_ok=True)
-    mount_point = str(base)
-
-    # Build auth/options payload (do NOT log secrets)
-    auth: dict[str, Any] = {}
-    if isinstance(endpoint.get("auth"), dict):
-        auth.update(endpoint.get("auth") or {})
-
-    # Backward-compatible: endpoints table columns may be stored at top-level
-    for k in ("port", "guest", "username", "password", "options"):
-        if k in endpoint and endpoint.get(k) is not None and k not in auth:
-            auth[k] = endpoint.get(k)
-
-    # Build ShareAuth object
-    share_auth = ShareAuth(
-        username=auth.get("username"),
-        password=auth.get("password"),
-        domain=auth.get("domain") or auth.get("workgroup"),
-    )
-
-    # Parse host and remote from location (SMB only)
-    host, remote = _parse_smb_location(loc)
-    # mount_smbfs (used by Share on macOS) expects a URL-like remote; spaces and other
-    # characters must be percent-encoded, but keep '/' separators intact.
-    remote = quote(remote, safe="/")
-
-    # Determine port and options
-    port = None
-    try:
-        if auth.get("port") is not None:
-            port = int(auth.get("port"))
-    except Exception:
-        port = None
-    if port is None:
-        port = 445
-
-    opts = {}
-    if isinstance(auth.get("options"), dict):
-        opts.update(auth.get("options") or {})
-
-    # Emit a safe debug line (mask secrets, include host/remote)
-    safe_auth = dict(auth)
-    for k in ("password", "pass"):
-        if k in safe_auth and safe_auth[k]:
-            safe_auth[k] = "***"
-    log_append(
-        f"[Replicator][Share] mount protocol={t} host={host} remote={remote} mount_point={mount_point} auth={safe_auth}",
-        level="debug",
-    )
-
-    # Call Share.mount with correct signature
-    share.mount(
-        t,
-        host,
-        remote,
-        mount_point,
-        auth=share_auth,
-        port=port,
-        options=opts,
-        read_only=bool(auth.get("read_only") or auth.get("ro") or False),
-        elevate=False,
-        timeout=60,
-    )
-
-    return _MountedEndpoint(local_path=mount_point, mount_point=mount_point, share=share)
-
 
 class Replicator(QMainWindow):
 
@@ -239,6 +96,10 @@ class Replicator(QMainWindow):
         self._logger: Optional[Log] = logger
 
         self._fs = FileSystem(helper=self._helper, logger=self._logger)
+
+        # Shared Share instance (for SMB mounts) so we don't recreate it on every job run.
+        self._share_logger = _ShareLogger(self._log)
+        self._share = Share(logger=self._share_logger)
 
         # --- Database path setup ---
         # Use Helper.get_data_path to locate data/replicator.db
@@ -280,124 +141,28 @@ class Replicator(QMainWindow):
         except Exception:
             return None
 
-    def _window_allows_now_local(self, windows: Dict[str, Any], now_local: datetime) -> bool:
-        """
-        Determine if 'now_local' falls inside an allowed window for its weekday.
-        Windows are interpreted as LOCAL times (America/Montreal via system tz).
-        Supports overnight windows like 22:00-06:00.
-        If windows is empty/missing => allowed.
-        """
-        if not windows or not isinstance(windows, dict):
-            return True
+    def _should_run_scheduled(self, job: Job, *, now_utc: datetime) -> bool:
+        """Decide if a job should run in SERVICE/SCHEDULED mode.
 
-        wd = now_local.weekday()  # 0..6 (Mon..Sun)
-        day_windows = windows.get(str(wd)) or windows.get(wd)
-        if not isinstance(day_windows, list) or not day_windows:
-            return False
-
-        tnow = now_local.time().replace(tzinfo=None)
-
-        def _parse_hhmm(val: Any) -> Optional[tuple[int, int]]:
-            try:
-                parts = str(val).strip().split(":")
-                if len(parts) != 2:
-                    return None
-                hh = int(parts[0]); mm = int(parts[1])
-                if hh < 0 or hh > 23 or mm < 0 or mm > 59:
-                    return None
-                return hh, mm
-            except Exception:
-                return None
-
-        for w in day_windows:
-            if not isinstance(w, dict):
-                continue
-            s = w.get("start"); e = w.get("end")
-            if not s or not e:
-                continue
-            ps = _parse_hhmm(s); pe = _parse_hhmm(e)
-            if ps is None or pe is None:
-                continue
-            sh, sm = ps; eh, em = pe
-            ts = datetime(2000, 1, 1, sh, sm).time()
-            te = datetime(2000, 1, 1, eh, em).time()
-
-            if ts <= te:
-                if ts <= tnow <= te:
-                    return True
-            else:
-                # overnight
-                if tnow >= ts or tnow <= te:
-                    return True
-
-        return False
-
-    def _interval_seconds_for_schedule_row(self, sched_row: Dict[str, Any], now_local: datetime) -> int:
-        """
-        Return interval seconds for this schedule row.
-        Priority:
-          1) schedule.intervalSeconds column
-          2) windows[weekday][0].intervalSeconds
-          3) service.defaultInterval
-        """
-        default_iv = self._default_interval_seconds()
-
-        try:
-            col = sched_row.get("intervalSeconds")
-            if col is not None:
-                iv = int(col or 0)
-                if iv > 0:
-                    return iv
-        except Exception:
-            pass
-
-        try:
-            windows = sched_row.get("windows") or {}
-            if isinstance(windows, str):
-                windows = json.loads(windows) if windows else {}
-            if isinstance(windows, dict):
-                wd = now_local.weekday()
-                day = windows.get(str(wd)) or windows.get(wd)
-                if isinstance(day, list) and day and isinstance(day[0], dict):
-                    v = day[0].get("intervalSeconds")
-                    if v is not None:
-                        iv = int(v or 0)
-                        if iv > 0:
-                            return iv
-        except Exception:
-            pass
-
-        return default_iv
-
-    def _should_run_scheduled(self, job: Job, *, now_utc: datetime, now_local: datetime) -> bool:
-        """
-        Decide if a job should run in SERVICE/SCHEDULED mode.
         Manual 'Run now' intentionally bypasses this.
         """
         if not job.id:
             return False
 
         sched = self._db.one(
-            "SELECT enabled, nextRunAt, lastScheduledRunAt, windows, intervalSeconds FROM schedule WHERE jobId=?",
+            "SELECT enabled, nextRunAt, lastScheduledRunAt FROM schedule WHERE jobId=?",
             (int(job.id),),
         )
         if not sched:
             # No schedule row => do not auto-run (manual run still works)
             return False
 
+        # Schedule must be explicitly enabled in DB
         if not bool(sched.get("enabled", 0)):
             return False
 
-        # windows are local-time based
-        windows: Dict[str, Any] = {}
-        try:
-            raw = sched.get("windows")
-            if raw:
-                windows = json.loads(raw) if isinstance(raw, str) else (raw if isinstance(raw, dict) else {})
-        except Exception:
-            windows = {}
-
-        if not self._window_allows_now_local(windows, now_local):
+        # Schedule windows/interval are defined on the Job domain object
+        if not job.schedule.should_run_now(now_utc):
             return False
 
         # Respect nextRunAt if present
@@ -405,12 +170,14 @@ class Replicator(QMainWindow):
         if next_dt and now_utc < next_dt:
             return False
 
-        interval_s = self._interval_seconds_for_schedule_row(sched, now_local)
+        # Respect lastScheduledRunAt + interval
         last_dt = self._parse_iso_dt(sched.get("lastScheduledRunAt"))
-
         if last_dt is None:
-            # first scheduled run in an allowed window
             return True
+
+        interval_s = int(job.schedule.interval_seconds_for_now(now_utc) or 0)
+        if interval_s <= 0:
+            interval_s = self._default_interval_seconds()
 
         elapsed = (now_utc - last_dt).total_seconds()
         return elapsed >= float(interval_s)
@@ -614,7 +381,8 @@ class Replicator(QMainWindow):
         a_root = self._endpoint_local_root(src_ep)
         b_root = self._endpoint_local_root(dst_ep)
 
-        allow_deletion = bool(job.get("allowDeletion", False))
+        # Deletion behavior is derived from mode; mirror allows deletions.
+        allow_deletion = str(job.get("mode") or "mirror").lower() == "mirror"
         preserve_metadata = bool(job.get("preserveMetadata", True))
         conflict_policy = (job.get("conflictPolicy") or "newest").lower()
 
@@ -956,7 +724,9 @@ class Replicator(QMainWindow):
 
         # Ensure columns never shrink below their content (use scrollbar for overflow)
         header = self._table.horizontalHeader()
-        for i in range(self._table.columnCount()):
+        # Performance: ResizeToContents on every column can get painfully slow.
+        header.setSectionResizeMode(0, QHeaderView.Stretch)  # Name
+        for i in range(1, self._table.columnCount()):
             header.setSectionResizeMode(i, QHeaderView.ResizeToContents)
 
         # Keep horizontal scrollbar available for overflow
@@ -984,7 +754,6 @@ class Replicator(QMainWindow):
 
         self._reload_jobs()
         self._on_selection_changed()
-
 
     def _on_selection_changed(self, *_args):
         has = self._selected_index() >= 0
@@ -1054,34 +823,19 @@ class Replicator(QMainWindow):
         for wd in range(7):
             windows[str(wd)] = [{"start": "00:00", "end": "23:59", "intervalSeconds": interval}]
         return {
-            "enabled": True,
+            "enabled": False,
             "intervalSeconds": interval,
             "windows": windows,
         }
 
     def _schedule_interval_seconds_for_now(self, sched: Dict[str, Any]) -> int:
-        """Best-effort interval seconds for logging (supports per-day interval stored in window dicts)."""
+        # Kept for backward compatibility with existing log formatting.
+        # Prefer the Job/Schedule domain helpers where possible.
         try:
-            windows = sched.get("windows") if isinstance(sched.get("windows"), dict) else {}
-            wd = datetime.now().astimezone().weekday()
-            day = windows.get(str(wd)) or windows.get(wd)  # type: ignore[index]
-            if isinstance(day, list) and day and isinstance(day[0], dict):
-                v = day[0].get("intervalSeconds")
-                if v is not None:
-                    return int(v)
+            j = self._job_from_legacy_dict({"schedule": sched, "name": "_tmp", "enabled": True, "sourceEndpoint": {"type": "local", "location": "/"}, "targetEndpoint": {"type": "local", "location": "/"}})
+            return int(j.schedule.interval_seconds_for_now(datetime.now(timezone.utc)) or 0) or self._default_interval_seconds()
         except Exception:
-            pass
-
-        default_interval = self._default_interval_seconds()
-
-        try:
-            if "intervalSeconds" in sched:
-                v = int(sched.get("intervalSeconds") or 0)
-                return v if v > 0 else default_interval
-        except Exception:
-            pass
-
-        return default_interval
+            return self._default_interval_seconds()
 
     def _job_from_legacy_dict(self, d: Dict[str, Any], *, existing_id: Optional[int] = None) -> Job:
         src = d.get("sourceEndpoint") or {"type": "local", "location": d.get("source", ""), "auth": {}}
@@ -1126,7 +880,8 @@ class Replicator(QMainWindow):
             enabled=bool(d.get("enabled", True)),
             mode=str(d.get("mode") or "mirror"),
             direction=str(d.get("direction") or "unidirectional"),
-            allowDeletion=bool(d.get("allowDeletion", False)),
+            # Deletion behavior is derived from mode; mirror allows deletions.
+            allowDeletion=(str(d.get("mode") or "mirror").lower() == "mirror"),
             preserveMetadata=bool(d.get("preserveMetadata", True)),
             conflictPolicy=str(d.get("conflictPolicy") or "newest"),
             pairId=d.get("pairId"),
@@ -1149,7 +904,7 @@ class Replicator(QMainWindow):
         windows = sched.get("windows") if isinstance(sched.get("windows"), dict) else {}
 
         j.schedule = Schedule(
-            enabled=bool(sched.get("enabled", True)),
+            enabled=bool(sched.get("enabled", False)),
             intervalSeconds=int(iv),
             windows=windows,
         )
@@ -1219,7 +974,23 @@ class Replicator(QMainWindow):
         )
         if choice == "Delete":
             if job.id:
-                self._store.delete(int(job.id))
+                jid = int(job.id)
+                try:
+                    with self._db.transaction():
+                        # Explicitly delete dependent rows to avoid orphans.
+                        self._db.execute("DELETE FROM endpoints WHERE jobId = ?", (jid,))
+                        self._db.execute("DELETE FROM schedule WHERE jobId = ?", (jid,))
+                        self._db.execute("DELETE FROM runs WHERE jobId = ?", (jid,))
+                        self._db.execute("DELETE FROM conflicts WHERE jobId = ?", (jid,))
+                        self._db.execute("DELETE FROM file_state WHERE jobId = ?", (jid,))
+                        self._db.execute("DELETE FROM jobs WHERE id = ?", (jid,))
+                except Exception as e:
+                    self._log(f"[Replicator][DB] Failed to delete job {jid} cascade: {e}", level="warning")
+                    # Fallback to store deletion if cascade failed.
+                    try:
+                        self._store.delete(jid)
+                    except Exception:
+                        pass
             self._reload_jobs()
 
     def _edit_schedule(self):
@@ -1271,7 +1042,6 @@ class Replicator(QMainWindow):
             return False
 
         now_utc = datetime.now(timezone.utc)
-        now_local = now_utc.astimezone()  # interpret windows as local times
 
         any_ran = False
         all_ok = True
@@ -1280,7 +1050,7 @@ class Replicator(QMainWindow):
             if not bool(job.enabled):
                 continue
 
-            if not self._should_run_scheduled(job, now_utc=now_utc, now_local=now_local):
+            if not self._should_run_scheduled(job, now_utc=now_utc):
                 continue
 
             any_ran = True
@@ -1289,11 +1059,7 @@ class Replicator(QMainWindow):
 
             # Update schedule bookkeeping for this job
             try:
-                sched_row = self._db.one(
-                    "SELECT enabled, nextRunAt, lastScheduledRunAt, windows, intervalSeconds FROM schedule WHERE jobId=?",
-                    (int(job.id),),
-                ) or {}
-                interval_s = self._interval_seconds_for_schedule_row(sched_row, now_local)
+                interval_s = int(job.schedule.interval_seconds_for_now(datetime.now(timezone.utc)) or 0) or self._default_interval_seconds()
                 next_run = (datetime.now(timezone.utc) + timedelta(seconds=int(interval_s))).isoformat()
                 self._db.update(
                     "schedule",
@@ -1369,20 +1135,28 @@ class Replicator(QMainWindow):
         src_type = job.sourceEndpoint.type
         dst = job.targetEndpoint.location
         dst_type = job.targetEndpoint.type
-        allow_deletion = bool(job.allowDeletion)
-        preserve_metadata = bool(job.preserveMetadata)
         mode = job.mode
+        # Deletion behavior is derived from mode; mirror allows deletions.
+        allow_deletion = str(mode or "mirror").lower() == "mirror"
+        preserve_metadata = bool(job.preserveMetadata)
         direction = job.direction
-        schedule = job.to_legacy_dict().get("schedule") or {}
 
         if not src or not dst:
-            self._log(f"[Replicator] Job '{name}' invalid: missing source/target.", level="error")
+            self._log(f"[Replicator] Job '{name}' invalid: missing source or target path (src='{src}', dst='{dst}').", level="error")
             return False
 
         sched_str = ""
-        if isinstance(schedule, dict) and bool(schedule.get("enabled", True)):
-            interval_s = self._schedule_interval_seconds_for_now(schedule)
-            sched_str = f", schedule=Interval {interval_s}s"
+        try:
+            if job_id:
+                sched = self._db.one(
+                    "SELECT enabled FROM schedule WHERE jobId=?",
+                    (int(job_id),),
+                )
+                if sched and bool(sched.get("enabled", 0)):
+                    interval_s = int(job.schedule.interval_seconds_for_now(datetime.now(timezone.utc)) or 0) or self._default_interval_seconds()
+                    sched_str = f", schedule=Interval {interval_s}s"
+        except Exception:
+            pass
         logline = f"[Replicator] Running job '{name}': {src} -> {dst} (mode={mode}, direction={direction}, delete={allow_deletion}, meta={preserve_metadata}{sched_str}"
         logline += f", srcType={src_type}, dstType={dst_type})"
         self._log(logline)
@@ -1405,42 +1179,44 @@ class Replicator(QMainWindow):
 
         ok = False
         try:
-            if str(direction).lower() == "bidirectional":
-                # Mount remote endpoints (SMB only) via Share so the bidirectional engine can
-                # operate on local filesystem paths AND we get proper connectivity debug logs.
-                mounted: list[_MountedEndpoint] = []
-                job_dict = job.to_legacy_dict()
+            # Always build a legacy dict so we can reuse the endpoint records + auth.
+            job_dict = job.to_legacy_dict()
+            src_ep = job_dict.get("sourceEndpoint") or {"type": "local", "location": src, "auth": {}}
+            dst_ep = job_dict.get("targetEndpoint") or {"type": "local", "location": dst, "auth": {}}
 
-                src_ep = job_dict.get("sourceEndpoint") or {"type": "local", "location": src, "auth": {}}
-                dst_ep = job_dict.get("targetEndpoint") or {"type": "local", "location": dst, "auth": {}}
+            # Mount remote endpoints (SMB only) via Share so BOTH uni + bidi operate on
+            # local filesystem paths, and we get connectivity debug logs.
+            mounted: list[MountedEndpoint] = []
 
-                share_logger = _ShareLogger(self._log)
-                share = Share(logger=share_logger)
-
-                src_m = _mount_endpoint_if_remote(src_ep, job_id, "source", share=share, log_append=self._log)
+            try:
+                src_m = mount_endpoint_if_remote(src_ep, job_id, "source", share=self._share, log_append=self._log)
                 mounted.append(src_m)
-                dst_m = _mount_endpoint_if_remote(dst_ep, job_id, "target", share=share, log_append=self._log)
+                dst_m = mount_endpoint_if_remote(dst_ep, job_id, "target", share=self._share, log_append=self._log)
                 mounted.append(dst_m)
 
-                # Local view for the bidirectional sync engine
-                job_dict["sourceEndpoint"] = {"type": "local", "location": src_m.local_path, "auth": {}}
-                job_dict["targetEndpoint"] = {"type": "local", "location": dst_m.local_path, "auth": {}}
+                # Use the mounted/local view for execution
+                local_src = src_m.local_path
+                local_dst = dst_m.local_path
 
-                try:
+                if str(direction).lower() == "bidirectional":
+                    # Local view for the bidirectional sync engine
+                    job_dict["sourceEndpoint"] = {"type": "local", "location": local_src, "auth": {}}
+                    job_dict["targetEndpoint"] = {"type": "local", "location": local_dst, "auth": {}}
                     ok, bidi_stats = self._run_job_bidirectional(job_dict, run_id)
-                finally:
-                    for m in reversed(mounted):
-                        try:
-                            m.cleanup()
-                        except Exception:
-                            pass
-            else:
-                ok = self._fs.copy(
-                    src,
-                    dst,
-                    preserve_metadata=preserve_metadata,
-                    allow_deletion=allow_deletion,
-                )
+                else:
+                    # Unidirectional copy (mirror) also uses mounted/local paths
+                    ok = self._fs.copy(
+                        local_src,
+                        local_dst,
+                        preserve_metadata=preserve_metadata,
+                        allow_deletion=allow_deletion,
+                    )
+            finally:
+                for m in reversed(mounted):
+                    try:
+                        m.cleanup()
+                    except Exception:
+                        pass
         except NotImplementedError as e:
             self._log(f"[Replicator] Job '{name}' not supported: {e}", level="error")
             ok = False

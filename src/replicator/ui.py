@@ -31,7 +31,6 @@ try:
 except ImportError:
     from ui import MsgBox
 
-
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
@@ -45,7 +44,6 @@ class BrowseLineEdit(QLineEdit):
         except Exception:
             pass
         super().mousePressEvent(event)
-
 
 # ------------------------------------------------------------------
 # Job Dialog

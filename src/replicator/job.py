@@ -2,13 +2,12 @@
 # src/replicator/job.py
 
 from __future__ import annotations
-
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone, time
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple, Union
-import json
-
 from urllib.parse import urlparse
+from .mount import RemoteMountError, MountedEndpoint, mount_endpoint_if_remote
 
 try:
     # corePY SQLite wrapper (preferred)
@@ -16,15 +15,7 @@ try:
 except Exception:  # pragma: no cover
     SQLite = None  # type: ignore
 
-
-from .mount import RemoteMountError, MountedEndpoint, mount_endpoint_if_remote
-
-
-
 JsonDict = Dict[str, Any]
-
-
-
 
 # ---------------------------------------------------------------------------
 # Data models
@@ -109,10 +100,9 @@ class Endpoint:
 
         return Endpoint(type=t, location=row.get("location") or "", auth=auth)
 
-
 @dataclass
 class Schedule:
-    enabled: bool = True
+    enabled: bool = False
     intervalSeconds: int = 3600
     windows: Dict[str, Any] = field(default_factory=dict)
 
@@ -328,7 +318,6 @@ class Schedule:
 
         return None
 
-
 @dataclass
 class JobRunResult:
     ok: bool
@@ -338,7 +327,6 @@ class JobRunResult:
     message: Optional[str] = None
     stats: JsonDict = field(default_factory=dict)
 
-
 @dataclass
 class Job:
     id: Optional[int] = None
@@ -346,7 +334,6 @@ class Job:
     enabled: bool = True
     mode: str = "mirror"
     direction: str = "unidirectional"
-    allowDeletion: bool = False
     preserveMetadata: bool = True
     conflictPolicy: str = "newest"
     pairId: Optional[str] = None
@@ -474,7 +461,6 @@ class Job:
                     enabled=self.enabled,
                     mode=self.mode,
                     direction=self.direction,
-                    allowDeletion=self.allowDeletion,
                     preserveMetadata=self.preserveMetadata,
                     conflictPolicy=self.conflictPolicy,
                     pairId=self.pairId,
@@ -533,7 +519,7 @@ class Job:
             "enabled": 1 if self.enabled else 0,
             "mode": self.mode or "mirror",
             "direction": self.direction or "unidirectional",
-            "allowDeletion": 1 if (str(self.mode or "").lower() == "mirror") else 0,
+            # "allowDeletion" entry removed; will be derived at write time
             "preserveMetadata": 1 if self.preserveMetadata else 0,
             "pairId": self.pairId,
             "conflictPolicy": self.conflictPolicy or "newest",
@@ -579,9 +565,6 @@ class Job:
             lastError=job_row.get("lastError"),
         )
 
-        # mode is the source of truth for deletion behavior
-        j.allowDeletion = (str(j.mode or "").lower() == "mirror")
-
         src = None
         tgt = None
         for r in endpoint_rows:
@@ -621,24 +604,6 @@ class Job:
 
         return j
 
-    def to_legacy_dict(self) -> JsonDict:
-        return {
-            "id": self.id,
-            "name": self.name,
-            "enabled": self.enabled,
-            "mode": self.mode,
-            "direction": self.direction,
-            "allowDeletion": (str(self.mode or "").lower() == "mirror"),
-            "preserveMetadata": self.preserveMetadata,
-            "pairId": self.pairId,
-            "conflictPolicy": self.conflictPolicy,
-            "sourceEndpoint": {"type": self.sourceEndpoint.type, "location": self.sourceEndpoint.location, "auth": dict(self.sourceEndpoint.auth)},
-            "targetEndpoint": {"type": self.targetEndpoint.type, "location": self.targetEndpoint.location, "auth": dict(self.targetEndpoint.auth)},
-            "schedule": self.schedule.to_dict() if self.schedule else {"enabled": True, "intervalSeconds": 3600, "windows": {}},
-            "lastRun": self.lastRun,
-            "lastResult": self.lastResult,
-            "lastError": self.lastError,
-        }
 
 
 # ---------------------------------------------------------------------------
@@ -724,7 +689,8 @@ class JobStore:
                 "enabled": int(job_row.get("enabled") or 0),
                 "mode": job_row.get("mode") or "mirror",
                 "direction": job_row.get("direction") or "unidirectional",
-                "allowDeletion": int(job_row.get("allowDeletion") or 0),
+                # mode is the source of truth for deletion behavior
+                "allowDeletion": 1 if (str(job_row.get("mode") or "mirror").lower() == "mirror") else 0,
                 "preserveMetadata": int(job_row.get("preserveMetadata") or 0),
                 "pairId": job_row.get("pairId"),
                 "conflictPolicy": job_row.get("conflictPolicy") or "newest",
@@ -780,5 +746,21 @@ class JobStore:
         return int(job.id or 0)
 
     def delete(self, job_id: int) -> None:
+        jid = int(job_id)
         with self._transaction():
-            self._delete("jobs", "id = ?", (int(job_id),))
+            # Delete dependent rows first to avoid orphan data (and to work even without FK cascades)
+            try:
+                self._delete("endpoints", "jobId = ?", (jid,))
+            except Exception:
+                pass
+            try:
+                self._delete("schedule", "jobId = ?", (jid,))
+            except Exception:
+                pass
+            # These tables may exist depending on enabled features; delete best-effort.
+            for tbl in ("runs", "conflicts", "file_state"):
+                try:
+                    self._delete(tbl, "jobId = ?", (jid,))
+                except Exception:
+                    pass
+            self._delete("jobs", "id = ?", (jid,))
