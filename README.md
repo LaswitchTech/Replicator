@@ -31,7 +31,7 @@ Contributions to Replicator are welcome! If you have ideas for new features or h
 ### How to Contribute
   - **Fork the Repository**: Create a fork of the repository on GitHub.
   - **Create a New Branch**: For new features or bug fixes, create a new branch in your fork.
-  - **Submit a Pull Request**: Once your changes are ready, submit a pull request to the main repository.
+  - **Submit a Pull Request**: Once your changes are ready, submit a pull request to the main repository on the dev branch.
 
 ## To Do
   - ~~**Support for Local**: Add support for Local filesystems.~~
