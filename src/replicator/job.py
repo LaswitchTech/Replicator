@@ -100,6 +100,14 @@ class Endpoint:
 
         return Endpoint(type=t, location=row.get("location") or "", auth=auth)
 
+    def to_legacy_dict(self) -> Dict[str, Any]:
+        """Legacy/UI-friendly endpoint dict: {type, location, auth}."""
+        return {
+            "type": (self.type or "local").lower(),
+            "location": self.location or "",
+            "auth": dict(self.auth or {}),
+        }
+
 @dataclass
 class Schedule:
     enabled: bool = False
@@ -317,6 +325,10 @@ class Schedule:
                 return candidate_utc
 
         return None
+
+    def to_legacy_dict(self) -> Dict[str, Any]:
+        """Legacy/UI-friendly schedule dict (same shape UI expects)."""
+        return self.to_dict()
 
 @dataclass
 class JobRunResult:
@@ -604,7 +616,39 @@ class Job:
 
         return j
 
+    def to_legacy_dict(self) -> Dict[str, Any]:
+        """Legacy dict used by Replicator UI dialogs and older code paths."""
+        mode = (self.mode or "mirror").lower()
+        allow_deletion = (mode == "mirror")
 
+        d: Dict[str, Any] = {
+            "id": self.id,
+            "name": self.name,
+            "enabled": bool(self.enabled),
+            "mode": mode,
+            "direction": (self.direction or "unidirectional"),
+            "preserveMetadata": bool(self.preserveMetadata),
+            "conflictPolicy": (self.conflictPolicy or "newest"),
+            "pairId": self.pairId,
+            "lastRun": self.lastRun,
+            "lastResult": self.lastResult,
+            "lastError": self.lastError,
+
+            # Endpoints (new style)
+            "sourceEndpoint": self.sourceEndpoint.to_legacy_dict(),
+            "targetEndpoint": self.targetEndpoint.to_legacy_dict(),
+
+            # Backward compatible flat fields
+            "source": self.sourceEndpoint.location or "",
+            "target": self.targetEndpoint.location or "",
+
+            # Backward compatible deletion flag (derived from mode)
+            "allowDeletion": bool(allow_deletion),
+
+            # Schedule
+            "schedule": self.schedule.to_legacy_dict() if self.schedule else {},
+        }
+        return d
 
 # ---------------------------------------------------------------------------
 # JobStore (DB persistence)

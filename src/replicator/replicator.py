@@ -880,8 +880,6 @@ class Replicator(QMainWindow):
             enabled=bool(d.get("enabled", True)),
             mode=str(d.get("mode") or "mirror"),
             direction=str(d.get("direction") or "unidirectional"),
-            # Deletion behavior is derived from mode; mirror allows deletions.
-            allowDeletion=(str(d.get("mode") or "mirror").lower() == "mirror"),
             preserveMetadata=bool(d.get("preserveMetadata", True)),
             conflictPolicy=str(d.get("conflictPolicy") or "newest"),
             pairId=d.get("pairId"),
