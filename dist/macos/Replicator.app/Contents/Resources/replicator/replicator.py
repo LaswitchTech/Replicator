@@ -396,7 +396,7 @@ class Replicator(QMainWindow):
         if is_dir:
             # Only remove if empty; never rmtree blindly in sync engine.
             try:
-                os.rmdir(full)
+                shutil.rmtree(full)
             except OSError:
                 pass
         else:

@@ -362,7 +362,7 @@
 		</data>
 		<key>Resources/base_library.zip</key>
 		<data>
-		vUe/kIj5cDo/K3TzuzYmWrn4nNo=
+		jFqv+QhZSarQOxkEIIbAaK1Izeg=
 		</data>
 		<key>Resources/bin/nssm/windows/x86/nssm.exe</key>
 		<data>
@@ -566,7 +566,7 @@
 		</data>
 		<key>Resources/core/filesystem/filesystem.py</key>
 		<data>
-		sZ1WyhA7xMcUKNF6mdlFR9752dY=
+		dC6VCXYmLaFGAdCJ/Exa50iAx7c=
 		</data>
 		<key>Resources/core/filesystem/share.py</key>
 		<data>
@@ -9062,7 +9062,7 @@
 		</data>
 		<key>Resources/replicator/replicator.py</key>
 		<data>
-		cI8XfSDJOWtZU+8sHf9OsOt8UpQ=
+		u2z7fooOD73ODh/HyO6tdD3yYG0=
 		</data>
 		<key>Resources/replicator/ui.py</key>
 		<data>
@@ -10676,7 +10676,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			MRMO+Ffq8FBM7rYMDttT125hLZlAGEwCaY881EbaqG4=
+			ZqG8Xlu+he4SPP20ZGLOcBg85w/BwfWv2DHu7O95wFg=
 			</data>
 		</dict>
 		<key>Resources/bin/nssm/windows/x86/nssm.exe</key>
@@ -11033,7 +11033,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			z91MzV7A1wypYcQ7idhbIMqj3u9KqM/H4jTHBEKA5Ms=
+			NL64maQCpfcXJsaLhTYevOKllWGZQSvzmJUEX/XQAcc=
 			</data>
 		</dict>
 		<key>Resources/core/filesystem/share.py</key>
@@ -25931,7 +25931,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			NM05uLrGA2KCGRg8X9WlfM8UCXmb26qhKSxDxZZZww4=
+			epbuQHh9C+l+kRlbNbOlCNGh3U2ArPK55G9w5RQSMlk=
 			</data>
 		</dict>
 		<key>Resources/replicator/ui.py</key>
