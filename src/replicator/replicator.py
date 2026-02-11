@@ -6,6 +6,8 @@ import os
 import json
 import shutil
 import time
+import platform
+import subprocess
 from typing import Optional, Any, Dict, List
 from datetime import datetime, timezone, timedelta
 from PyQt5.QtCore import Qt
@@ -305,9 +307,83 @@ class Replicator(QMainWindow):
 
         if is_dir:
             os.makedirs(dst_full, exist_ok=True)
+
+            # On Windows, also replicate directory ACLs/owner/auditing when preserve_metadata is enabled.
+            # mkdir alone does not bring NTFS security descriptors over.
+            if preserve_metadata and platform.system().lower().startswith("win"):
+                try:
+                    # Prefer PowerShell Get-Acl/Set-Acl for a single directory.
+                    # This copies the security descriptor from src->dst.
+                    ps = shutil.which("powershell") or shutil.which("pwsh")
+                    if not ps:
+                        raise RuntimeError("PowerShell not found (powershell/pwsh)")
+
+                    cmd = [
+                        ps,
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        (
+                            "$src=[System.IO.Path]::GetFullPath($args[0]);"
+                            "$dst=[System.IO.Path]::GetFullPath($args[1]);"
+                            "$acl=Get-Acl -LiteralPath $src;"
+                            "Set-Acl -LiteralPath $dst -AclObject $acl"
+                        ),
+                        src_full,
+                        dst_full,
+                    ]
+                    proc = subprocess.run(cmd, capture_output=True, text=True)
+                    if int(proc.returncode) != 0:
+                        out = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
+                        raise RuntimeError(out.strip() or f"PowerShell exit code {proc.returncode}")
+                except Exception as e:
+                    # Best-effort: directory exists but ACLs may not match.
+                    self._log(f"[Replicator][BiDi] Directory ACL copy failed for '{rel}': {e}", level="warning")
+
             return
 
         self._ensure_parent_dir(dst_full)
+
+        # On Windows, preserve NTFS security descriptors (ACLs) when preserve_metadata is enabled.
+        # shutil.copy2() does NOT copy ACLs.
+        if preserve_metadata and platform.system().lower().startswith("win"):
+            src_dir = os.path.dirname(src_full)
+            dst_dir = os.path.dirname(dst_full)
+            filename = os.path.basename(src_full)
+
+            robocopy = shutil.which("robocopy") or "robocopy"
+            argv = [
+                robocopy,
+                src_dir,
+                dst_dir,
+                filename,
+                "/COPYALL",         # data, attrs, timestamps, security (ACLs), owner, auditing
+                "/DCOPY:DAT",       # only applies if robocopy needs to touch directories in this file copy
+                "/SECFIX",          # fix security on existing files too
+                "/R:1",
+                "/W:1",
+                "/NFL",             # no file list
+                "/NDL",             # no dir list
+                "/NP",              # no progress
+            ]
+
+            try:
+                # Robocopy returns special codes:
+                #   0..7 are success (0=none, 1=copied, 2=extra, 3=copied+extra, 5=mismatch, 6=extra+mismatch, 7=all)
+                #   8+ indicates failures.
+                proc = subprocess.run(argv, capture_output=True, text=True)
+                rc = int(proc.returncode)
+                if rc > 7:
+                    out = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
+                    raise RuntimeError(f"robocopy failed rc={rc}: {out.strip()}")
+            except Exception as e:
+                # Fall back to a best-effort copy if robocopy isn't available / fails.
+                # This may lose ACLs, so warn in logs.
+                self._log(f"[Replicator][BiDi] robocopy ACL copy failed for '{rel}': {e}; falling back to shutil.copy2()", level="warning")
+                shutil.copy2(src_full, dst_full)
+            return
+
+        # Non-Windows (or metadata not requested)
         if preserve_metadata:
             shutil.copy2(src_full, dst_full)
         else:
