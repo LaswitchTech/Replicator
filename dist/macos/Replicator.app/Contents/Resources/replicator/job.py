@@ -53,12 +53,11 @@ class Endpoint:
             username = auth.get("username") or None
             password = auth.get("password") or None
             # Optional SMB domain
-            options["domain"] = auth.get("domain")
-            # Optional rclone args (applies to all remote types)
-            if isinstance(auth.get("rcloneArgs"), list):
-                options["rcloneArgs"] = auth.get("rcloneArgs")
+            dom = auth.get("domain")
+            if dom:
+                options["domain"] = dom
 
-        known_keys = {"guest", "username", "password", "domain"}
+        known_keys = {"guest", "username", "password", "domain", "rcloneArgs"}
         for k, v in auth.items():
             if k not in known_keys:
                 options[k] = v

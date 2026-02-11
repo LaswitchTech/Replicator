@@ -231,7 +231,7 @@ def mount_endpoint_if_remote(
     loc = str(_get(endpoint, "location", "") or "").strip()
 
     if t == "local":
-        return MountedEndpoint(local_path=loc)
+        return MountedEndpoint(local_path=os.path.abspath(loc))
 
     if t != "smb":
         raise RemoteMountError(f"Unsupported endpoint type: {t}")
