@@ -357,14 +357,18 @@ class Replicator(QMainWindow):
                 src_dir,
                 dst_dir,
                 filename,
-                "/COPYALL",         # data, attrs, timestamps, security (ACLs), owner, auditing
-                "/DCOPY:DAT",       # only applies if robocopy needs to touch directories in this file copy
-                "/SECFIX",          # fix security on existing files too
+                "/COPYALL",
+                "/DCOPY:DAT",
+                "/SECFIX",
                 "/R:1",
                 "/W:1",
-                "/NFL",             # no file list
-                "/NDL",             # no dir list
-                "/NP",              # no progress
+                "/XJ",
+                "/FFT",
+                "/NP",
+                "/NDL",
+                "/NFL",
+                "/IS",
+                "/IT",
             ]
 
             try:
